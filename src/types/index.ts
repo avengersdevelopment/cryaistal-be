@@ -55,3 +55,18 @@ export interface ChainConfig {
     decimals: number;
   };
 }
+
+export interface TrustedTrader {
+  id: string;
+  address: string;
+  chain: Chain;
+  name: string;
+  description?: string;
+  min_copy_amount?: string;
+  max_copy_amount?: string;
+  isActive: boolean;
+  total_trades: number;
+  success_rate: number;
+  created_at?: string;
+  updated_at?: string;
+}

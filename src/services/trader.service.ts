@@ -1,14 +1,12 @@
-import { JsonRpcProvider, Contract } from "ethers";
-import { Chain, TraderProfile, Transaction } from "../types";
+import { JsonRpcProvider, Contract, ethers } from "ethers";
+import { Chain, TraderProfile, Transaction, TrustedTrader } from "../types";
 import { CHAIN_CONFIGS } from "../config/chains";
+import { config } from "../config/config";
 import { createClient } from "@supabase/supabase-js";
 import { WalletService } from "./wallet.service";
 import { UniswapService } from "./uniswap.service";
 
-const supabase = createClient(
-  process.env.SUPABASE_URL || "",
-  process.env.SUPABASE_KEY || ""
-);
+const supabase = createClient(config.supabase.url, config.supabase.key);
 
 const UNISWAP_POOL_ABI = [
   "event Swap(address indexed sender, address indexed recipient, int256 amount0, int256 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick)",
@@ -17,10 +15,37 @@ const UNISWAP_POOL_ABI = [
 export class TraderService {
   private walletService: WalletService;
   private uniswapService: UniswapService;
+  private activeTraders: Map<string, Contract> = new Map();
 
   constructor() {
     this.walletService = new WalletService();
     this.uniswapService = new UniswapService();
+  }
+
+  async startTrackingTrustedTraders() {
+    // Get all active trusted traders from database
+    const { data: traders, error } = await supabase
+      .from("trusted_traders")
+      .select("*")
+      .eq("is_active", true);
+
+    if (error) {
+      console.error("Error fetching trusted traders:", error);
+      return;
+    }
+
+    if (!traders || traders.length === 0) {
+      console.log("No active trusted traders found");
+      return;
+    }
+
+    // Start tracking each trader
+    for (const trader of traders) {
+      await this.trackTrader(trader.address, trader.chain as Chain);
+      console.log(
+        `Started tracking trader: ${trader.name} (${trader.address})`
+      );
+    }
   }
 
   async trackTrader(traderAddress: string, chain: Chain) {
@@ -30,6 +55,13 @@ export class TraderService {
       UNISWAP_POOL_ABI,
       provider
     );
+
+    // Store the contract to prevent duplicate listeners
+    const key = `${chain}:${traderAddress}`;
+    if (this.activeTraders.has(key)) {
+      return;
+    }
+    this.activeTraders.set(key, factory);
 
     // Listen for swap events
     factory.on(
@@ -64,53 +96,109 @@ export class TraderService {
     amount0: string;
     amount1: string;
   }) {
-    // Get followers of this trader
-    const { data: followers } = await supabase
-      .from("trader_followers")
-      .select("user_id")
-      .eq("trader_address", params.trader)
-      .eq("chain", params.chain);
+    // Get trusted trader configuration
+    const { data: trustedTrader } = await supabase
+      .from("trusted_traders")
+      .select("*")
+      .eq("address", params.trader)
+      .eq("chain", params.chain)
+      .eq("is_active", true)
+      .single();
 
-    if (!followers) return;
+    if (!trustedTrader) return;
 
-    // Copy trade for each follower
-    for (const follower of followers) {
+    // Get subscribed users
+    const { data: users } = await supabase
+      .from("users")
+      .select("telegram_id")
+      .eq("is_subscribed", true);
+
+    if (!users || users.length === 0) return;
+
+    // Copy trade for each subscribed user
+    for (const user of users) {
       try {
+        // Check user's balance first
+        const balance = await this.walletService.getWalletBalance(
+          user.telegram_id,
+          params.chain
+        );
+        const ethBalance = ethers.formatEther(balance);
+
+        // Skip if user has insufficient balance
+        if (parseFloat(ethBalance) < 0.1) {
+          console.log(
+            `Skipping user ${user.telegram_id} - insufficient balance`
+          );
+          continue;
+        }
+
         const wallet = await this.walletService.getWallet(
-          follower.user_id,
+          user.telegram_id,
           params.chain
         );
 
-        // Here you would implement the logic to copy the trade
-        // This is a simplified version - you'd need to add more sophisticated logic
-        // to handle token approvals, slippage, etc.
-        await this.uniswapService.swapExactInputSingle(wallet, params.chain, {
-          tokenIn: "", // You'd need to get these from the original transaction
-          tokenOut: "",
-          fee: 3000, // Default fee tier
-          amountIn: params.amount0,
-          amountOutMinimum: "0", // You'd want to calculate this based on slippage
-        });
+        let amountToCopy = params.amount0;
+
+        // Apply min/max copy amounts if configured
+        if (trustedTrader.min_copy_amount) {
+          amountToCopy = Math.max(
+            parseFloat(trustedTrader.min_copy_amount),
+            parseFloat(amountToCopy)
+          ).toString();
+        }
+
+        if (trustedTrader.max_copy_amount) {
+          amountToCopy = Math.min(
+            parseFloat(trustedTrader.max_copy_amount),
+            parseFloat(amountToCopy)
+          ).toString();
+        }
+
+        // Ensure amount doesn't exceed user's balance
+        amountToCopy = Math.min(
+          parseFloat(amountToCopy),
+          parseFloat(ethBalance) * 0.95 // Leave some for gas
+        ).toString();
+
+        // Execute the trade
+        const tx = await this.uniswapService.swapExactInputSingle(
+          wallet,
+          params.chain,
+          {
+            tokenIn: "", // Get from transaction trace
+            tokenOut: "", // Get from transaction trace
+            fee: 3000,
+            amountIn: ethers.parseEther(amountToCopy).toString(),
+            amountOutMinimum: "0", // Calculate based on slippage
+          }
+        );
 
         // Record the transaction
         await supabase.from("transactions").insert([
           {
-            user_id: follower.user_id,
+            user_id: user.telegram_id,
             trader_id: params.trader,
             chain: params.chain,
-            tx_hash: params.txHash,
+            tx_hash: tx.hash,
+            amount_in: amountToCopy,
             status: "completed",
           },
         ]);
+
+        // Update trader's stats
+        await this.updateTraderStats(trustedTrader.id, true);
+
+        // Notify user of successful trade
+        // You would implement notification logic here
       } catch (error: any) {
         console.error(
-          `Failed to copy trade for user ${follower.user_id}:`,
+          `Failed to copy trade for user ${user.telegram_id}:`,
           error
         );
-        // Record failed transaction
         await supabase.from("transactions").insert([
           {
-            user_id: follower.user_id,
+            user_id: user.telegram_id,
             trader_id: params.trader,
             chain: params.chain,
             tx_hash: params.txHash,
@@ -118,31 +206,45 @@ export class TraderService {
             error: error.message,
           },
         ]);
+
+        // Update trader's stats
+        await this.updateTraderStats(trustedTrader.id, false);
       }
     }
   }
 
-  async getTraderProfile(
-    address: string,
-    chain: Chain
-  ): Promise<TraderProfile> {
-    const { data, error } = await supabase
-      .from("trader_profiles")
-      .select("*")
-      .eq("address", address)
-      .eq("chain", chain)
+  private async updateTraderStats(traderId: string, success: boolean) {
+    const { data: trader } = await supabase
+      .from("trusted_traders")
+      .select("total_trades, success_rate")
+      .eq("id", traderId)
       .single();
 
-    if (error) throw error;
-    if (!data) throw new Error("Trader not found");
+    if (!trader) return;
 
-    return {
-      address: data.address,
-      chain: data.chain,
-      isActive: data.is_active,
-      followers: data.followers,
-      totalVolume: data.total_volume,
-      profitLoss: data.profit_loss,
-    };
+    const newTotalTrades = trader.total_trades + 1;
+    const successfulTrades = success
+      ? Math.ceil(trader.success_rate * trader.total_trades) + 1
+      : Math.ceil(trader.success_rate * trader.total_trades);
+    const newSuccessRate = (successfulTrades / newTotalTrades) * 100;
+
+    await supabase
+      .from("trusted_traders")
+      .update({
+        total_trades: newTotalTrades,
+        success_rate: newSuccessRate,
+      })
+      .eq("id", traderId);
+  }
+
+  async getTrustedTraders(): Promise<TrustedTrader[]> {
+    const { data, error } = await supabase
+      .from("trusted_traders")
+      .select("*")
+      .eq("is_active", true)
+      .order("success_rate", { ascending: false });
+
+    if (error) throw error;
+    return data || [];
   }
 }
