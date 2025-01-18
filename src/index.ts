@@ -1,26 +1,36 @@
-import { Telegraf } from 'telegraf';
-import { config } from './config/config';
-import { StartCommand } from './commands/start.command';
-import { authMiddleware } from './middlewares/auth.middleware';
+import { Telegraf } from "telegraf";
+import * as dotenv from "dotenv";
+import { setupStartCommand } from "./commands/start.command";
+import { setupDepositCommand } from "./commands/deposit.command";
+import { setupFollowCommand } from "./commands/follow.command";
+import { setupBalanceCommand } from "./commands/balance.command";
 
-const bot = new Telegraf(config.botToken);
+// Load environment variables
+dotenv.config();
 
-// Middleware
-// bot.use(authMiddleware);
+const bot = new Telegraf(process.env.BOT_TOKEN || "");
 
-// Commands
-bot.command('start', StartCommand.handle);
+// Setup commands
+setupStartCommand(bot);
+setupDepositCommand(bot);
+setupFollowCommand(bot);
+setupBalanceCommand(bot);
 
-// Launch bot
-bot.launch()
+// Error handling
+bot.catch((err: any) => {
+  console.error("Bot error:", err);
+});
+
+// Start bot
+bot
+  .launch()
   .then(() => {
-    console.log('Bot is running...');
+    console.log("Bot started successfully");
   })
   .catch((error) => {
-    console.error('Error starting bot:', error);
-    process.exit(1);
+    console.error("Error starting bot:", error);
   });
 
 // Enable graceful stop
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
+process.once("SIGINT", () => bot.stop("SIGINT"));
+process.once("SIGTERM", () => bot.stop("SIGTERM"));
