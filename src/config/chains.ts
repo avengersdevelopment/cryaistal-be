@@ -1,9 +1,11 @@
 import { Chain, ChainConfig } from "../types";
 
+const INFURA_KEY = process.env.INFURA_API_KEY;
+
 export const CHAIN_CONFIGS: Record<Chain, ChainConfig> = {
   [Chain.ETHEREUM]: {
     chainId: 1,
-    rpcUrl: process.env.ETH_RPC_URL || "",
+    rpcUrl: INFURA_KEY ? `https://mainnet.infura.io/v3/${INFURA_KEY}` : "",
     router: process.env.UNISWAP_V3_ROUTER || "",
     factory: process.env.UNISWAP_V3_FACTORY || "",
     nativeCurrency: {

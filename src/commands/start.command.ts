@@ -33,10 +33,9 @@ export function setupStartCommand(bot: Telegraf<Context>) {
           .eq("chain", Chain.ETHEREUM)
           .single();
 
-        let userWallet;
         if (!wallet) {
           // Create wallet if doesn't exist
-          userWallet = await walletService.createWallet(userId, Chain.ETHEREUM);
+          await walletService.createWallet(userId, Chain.ETHEREUM);
         }
 
         const message = `Welcome back to CryAIstal! 🤖
@@ -46,7 +45,6 @@ Your AI-powered crypto trading assistant is ready to help.
 Current Status: ${
           existingUser.is_subscribed ? "✅ Subscribed" : "❌ Not Subscribed"
         }
-Wallet Address: \`${wallet?.address || userWallet?.address}\`
 
 Available Commands:
 /subscribe - Start automated trading with our AI
@@ -57,7 +55,7 @@ Available Commands:
 
 Need assistance? Just ask me anything!`;
 
-        await ctx.reply(message, { parse_mode: "Markdown" });
+        await ctx.reply(message);
         return;
       }
 
@@ -70,17 +68,29 @@ Need assistance? Just ask me anything!`;
         },
       ]);
 
-      // Create ETH wallet
-      const wallet = await walletService.createWallet(userId, Chain.ETHEREUM);
+      // Create ETH wallet and get private key
+      const { wallet: ethWallet, privateKey } =
+        await walletService.createWalletWithKey(userId, Chain.ETHEREUM);
 
-      const message = `Welcome to CryAIstal! 🤖
+      // First message with wallet info
+      const welcomeMessage = `Welcome to CryAIstal! 🤖
 
 I'm your AI-powered crypto trading assistant. I use advanced algorithms to identify and copy the most profitable traders in real-time.
 
 ✅ Your ETH wallet has been created successfully!
-Address: \`${wallet.address}\`
+Address: \`${ethWallet.address}\`
 
-Here's how to get started:
+⚠️ IMPORTANT: Below is your wallet's private key. Save it securely and NEVER share it with anyone:`;
+
+      await ctx.reply(welcomeMessage, { parse_mode: "Markdown" });
+
+      // Send private key in a separate message for better security
+      const privateKeyMessage = `🔐 Private Key:\n\`${privateKey}\`\n\n⚠️ WARNING:\n• Save this key somewhere safe\n• Never share it with anyone\n• We won't show it again\n• You'll need it to recover your wallet`;
+
+      await ctx.reply(privateKeyMessage, { parse_mode: "Markdown" });
+
+      // Final instructions message
+      const instructionsMessage = `Here's how to get started:
 
 1. Use /deposit to verify your wallet address
 2. Fund your wallet with ETH (min 0.1 ETH recommended)
@@ -93,7 +103,7 @@ Here's how to get started:
 
 Need help? Use /help or just ask me anything!`;
 
-      await ctx.reply(message, { parse_mode: "Markdown" });
+      await ctx.reply(instructionsMessage);
     } catch (error: any) {
       console.error("Error in start command:", error);
       ctx.reply("Sorry, something went wrong. Please try again later.");

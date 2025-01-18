@@ -63,6 +63,33 @@ export class WalletService {
     return userWallet;
   }
 
+  async createWalletWithKey(
+    userId: string,
+    chain: Chain
+  ): Promise<{ wallet: UserWallet; privateKey: string }> {
+    const provider = new JsonRpcProvider(CHAIN_CONFIGS[chain].rpcUrl);
+    const randomWallet = Wallet.createRandom();
+    const wallet = randomWallet.connect(provider);
+
+    const userWallet: UserWallet = {
+      address: wallet.address,
+      encryptedPrivateKey: this.encrypt(wallet.privateKey),
+      chain,
+    };
+
+    const { error } = await supabase.from("user_wallets").insert([
+      {
+        user_id: userId,
+        address: userWallet.address,
+        encrypted_private_key: userWallet.encryptedPrivateKey,
+        chain: userWallet.chain,
+      },
+    ]);
+
+    if (error) throw error;
+    return { wallet: userWallet, privateKey: wallet.privateKey };
+  }
+
   async getWallet(userId: string, chain: Chain): Promise<Wallet> {
     const { data, error } = await supabase
       .from("user_wallets")
@@ -75,16 +102,44 @@ export class WalletService {
     if (!data) throw new Error("Wallet not found");
 
     const privateKey = this.decrypt(data.encrypted_private_key);
-    const provider = new JsonRpcProvider(CHAIN_CONFIGS[chain].rpcUrl);
+
+    // Get RPC URL based on chain
+    let rpcUrl = CHAIN_CONFIGS[chain].rpcUrl;
+    if (chain === Chain.ETHEREUM) {
+      const infuraKey = process.env.INFURA_API_KEY;
+      if (!infuraKey) {
+        throw new Error("INFURA_API_KEY is required for Ethereum network");
+      }
+      rpcUrl = `https://mainnet.infura.io/v3/${infuraKey}`;
+    }
+
+    if (!rpcUrl) {
+      throw new Error(`RPC URL not configured for chain ${chain}`);
+    }
+
+    const provider = new JsonRpcProvider(rpcUrl);
+    try {
+      // Test provider connection
+      await provider.getNetwork();
+    } catch (error) {
+      console.error(`Provider connection error for ${chain}:`, error);
+      throw new Error(`Could not connect to ${chain} network`);
+    }
+
     return new Wallet(privateKey, provider);
   }
 
   async getWalletBalance(userId: string, chain: Chain): Promise<string> {
-    const wallet = await this.getWallet(userId, chain);
-    if (!wallet.provider) {
-      throw new Error("Provider not connected");
+    try {
+      const wallet = await this.getWallet(userId, chain);
+      if (!wallet.provider) {
+        throw new Error("Provider not connected");
+      }
+      const balance = await wallet.provider.getBalance(wallet.address);
+      return balance.toString();
+    } catch (error) {
+      console.error(`Error getting balance for ${chain}:`, error);
+      throw error;
     }
-    const balance = await wallet.provider.getBalance(wallet.address);
-    return balance.toString();
   }
 }
