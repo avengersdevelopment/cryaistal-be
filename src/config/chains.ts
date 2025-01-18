@@ -1,11 +1,12 @@
 import { Chain, ChainConfig } from "../types";
 
 const INFURA_KEY = process.env.INFURA_API_KEY;
+const IS_TESTNET = process.env.NODE_ENV === 'testnet';
 
 export const CHAIN_CONFIGS: Record<Chain, ChainConfig> = {
   [Chain.ETHEREUM]: {
-    chainId: 1,
-    rpcUrl: INFURA_KEY ? `https://mainnet.infura.io/v3/${INFURA_KEY}` : "",
+    chainId: IS_TESTNET ? 11155111 : 1,
+    rpcUrl: INFURA_KEY ? `https://${IS_TESTNET ? 'sepolia' : 'mainnet'}.infura.io/v3/${INFURA_KEY}` : "",
     router: process.env.UNISWAP_V3_ROUTER || "",
     factory: process.env.UNISWAP_V3_FACTORY || "",
     nativeCurrency: {
@@ -14,8 +15,8 @@ export const CHAIN_CONFIGS: Record<Chain, ChainConfig> = {
     },
   },
   [Chain.BASE]: {
-    chainId: 8453,
-    rpcUrl: process.env.BASE_RPC_URL || "",
+    chainId: IS_TESTNET ? 84531 : 8453,
+    rpcUrl: IS_TESTNET ? "https://goerli.base.org" : (process.env.BASE_RPC_URL || ""),
     router: process.env.UNISWAP_V3_ROUTER || "",
     factory: process.env.UNISWAP_V3_FACTORY || "",
     nativeCurrency: {
@@ -24,8 +25,8 @@ export const CHAIN_CONFIGS: Record<Chain, ChainConfig> = {
     },
   },
   [Chain.POLYGON]: {
-    chainId: 137,
-    rpcUrl: process.env.POLYGON_RPC_URL || "",
+    chainId: IS_TESTNET ? 80001 : 137,
+    rpcUrl: IS_TESTNET ? "https://rpc-mumbai.maticvigil.com" : (process.env.POLYGON_RPC_URL || ""),
     router: process.env.UNISWAP_V3_ROUTER || "",
     factory: process.env.UNISWAP_V3_FACTORY || "",
     nativeCurrency: {
@@ -34,8 +35,8 @@ export const CHAIN_CONFIGS: Record<Chain, ChainConfig> = {
     },
   },
   [Chain.ARBITRUM]: {
-    chainId: 42161,
-    rpcUrl: process.env.ARBITRUM_RPC_URL || "",
+    chainId: IS_TESTNET ? 421613 : 42161,
+    rpcUrl: IS_TESTNET ? "https://goerli-rollup.arbitrum.io/rpc" : (process.env.ARBITRUM_RPC_URL || ""),
     router: process.env.UNISWAP_V3_ROUTER || "",
     factory: process.env.UNISWAP_V3_FACTORY || "",
     nativeCurrency: {
