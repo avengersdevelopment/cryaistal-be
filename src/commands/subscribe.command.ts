@@ -7,7 +7,8 @@ import { createClient } from "@supabase/supabase-js";
 import { ethers } from "ethers";
 
 const supabase = createClient(config.supabase.url, config.supabase.key);
-const MIN_ETH_REQUIRED = "0.1"; // 0.1 ETH minimum
+const MIN_ETH_REQUIRED = "0.01"; // Minimum lowered to 0.01 ETH
+const ALLOWED_PERCENTAGES = [10, 25, 50, 100];
 
 export function setupSubscribeCommand(bot: Telegraf<Context>) {
   const walletService = new WalletService();
@@ -18,6 +19,30 @@ export function setupSubscribeCommand(bot: Telegraf<Context>) {
       const userId = ctx.from?.id.toString();
       if (!userId) {
         ctx.reply("Error: Could not identify user");
+        return;
+      }
+
+      const args = ctx.message.text.split(" ");
+      const tradingInput = args[1];
+
+      if (!tradingInput) {
+        // Create keyboard markup with percentage options
+        await ctx.reply(`Please select the percentage of your balance to use for trading, or enter a custom amount:
+
+Format for custom amount:
+/subscribe <eth_amount>
+Example: /subscribe 0.05`, {
+          reply_markup: {
+            inline_keyboard: [
+              [
+                { text: "10%", callback_data: "subscribe_10" },
+                { text: "25%", callback_data: "subscribe_25" },
+                { text: "50%", callback_data: "subscribe_50" },
+                { text: "100%", callback_data: "subscribe_100" }
+              ]
+            ]
+          }
+        });
         return;
       }
 
@@ -36,7 +61,7 @@ export function setupSubscribeCommand(bot: Telegraf<Context>) {
       if (user.is_subscribed) {
         const message = `You are already subscribed! 🎯
 
-Current Trading Status: Active ✅
+Trading Status: Active ✅
 Use /performance to check your trading results.
 Use /unsubscribe to stop automated trading.`;
 
@@ -54,11 +79,45 @@ Use /unsubscribe to stop automated trading.`;
       if (parseFloat(ethBalance) < parseFloat(MIN_ETH_REQUIRED)) {
         const message = `Insufficient ETH balance to start trading.
 
-Required: ${MIN_ETH_REQUIRED} ETH
-Current: ${ethBalance} ETH
+Required minimum: ${MIN_ETH_REQUIRED} ETH
+Current balance: ${ethBalance} ETH
 
 Please use /deposit to get your wallet address and add more ETH.`;
         ctx.reply(message);
+        return;
+      }
+
+      let tradingAmount: string;
+      let percentageUsed: number | null = null;
+      
+      // Check if input is percentage
+      if (tradingInput.endsWith('%')) {
+        const percentage = parseFloat(tradingInput.slice(0, -1));
+        
+        if (!ALLOWED_PERCENTAGES.includes(percentage)) {
+          ctx.reply(`Invalid percentage. Please select from the available options: ${ALLOWED_PERCENTAGES.join('%,  ')}%`);
+          return;
+        }
+
+        tradingAmount = (parseFloat(ethBalance) * (percentage / 100)).toFixed(8);
+        percentageUsed = percentage;
+      } else {
+        // Handle fixed amount input
+        if (isNaN(parseFloat(tradingInput)) || parseFloat(tradingInput) <= 0) {
+          ctx.reply("Invalid ETH amount. Please enter a number greater than 0.");
+          return;
+        }
+        tradingAmount = tradingInput;
+        percentageUsed = (parseFloat(tradingAmount) / parseFloat(ethBalance)) * 100;
+      }
+
+      if (parseFloat(tradingAmount) > parseFloat(ethBalance)) {
+        ctx.reply(`The ETH amount (${tradingAmount} ETH) exceeds your balance (${ethBalance} ETH).`);
+        return;
+      }
+
+      if (parseFloat(tradingAmount) < parseFloat(MIN_ETH_REQUIRED)) {
+        ctx.reply(`The trading amount (${tradingAmount} ETH) is below the minimum required (${MIN_ETH_REQUIRED} ETH).`);
         return;
       }
 
@@ -78,6 +137,7 @@ Please use /deposit to get your wallet address and add more ETH.`;
         .update({
           is_subscribed: true,
           subscription_date: new Date().toISOString(),
+          trading_amount: tradingAmount
         })
         .eq("telegram_id", userId);
 
@@ -91,18 +151,21 @@ Please use /deposit to get your wallet address and add more ETH.`;
 
       const message = `🎉 Successfully subscribed to CryAIstal AI Trading!
 
-Your wallet is now connected to our AI trading system. We'll automatically copy trades from our trusted traders:
+Your wallet is now connected to our AI trading system. 
+Trading amount: ${tradingAmount} ETH (${percentageUsed.toFixed(1)}% of your balance)
+
+We will automatically copy trades from our trusted traders:
 
 ${tradersInfo}
 
 Current Balance: ${ethBalance} ETH
 Trading Status: Active ✅
 
-We'll automatically:
-• Monitor these traders 24/7
-• Copy their profitable trades in real-time
+We will automatically:
+• Monitor traders 24/7
+• Copy profitable trades in real-time
 • Manage risk and position sizing
-• Send you performance updates
+• Send performance updates
 
 Use /performance to track your trading results.
 Use /unsubscribe anytime to stop trading.
@@ -115,6 +178,20 @@ Happy trading! 🚀`;
       await traderService.startTrackingTrustedTraders();
     } catch (error: any) {
       console.error("Error in subscribe command:", error);
+      ctx.reply("Sorry, something went wrong. Please try again later.");
+    }
+  });
+
+  // Handle callback queries for percentage selections
+  bot.action(/subscribe_(\d+)/, async (ctx) => {
+    try {
+      const percentage = ctx.match[1];
+      await ctx.answerCbQuery(); // Acknowledge the button press
+      
+      // Execute subscribe command with selected percentage
+      await ctx.reply(`/subscribe ${percentage}%`);
+    } catch (error) {
+      console.error("Error handling subscription callback:", error);
       ctx.reply("Sorry, something went wrong. Please try again later.");
     }
   });
