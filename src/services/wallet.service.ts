@@ -2,30 +2,26 @@ import { Wallet, JsonRpcProvider } from "ethers";
 import * as crypto from "crypto";
 import { Chain, UserWallet } from "../types";
 import { CHAIN_CONFIGS } from "../config/chains";
+import { config } from "../config/config";
 import { createClient } from "@supabase/supabase-js";
 
-const supabase = createClient(
-  process.env.SUPABASE_URL || "",
-  process.env.SUPABASE_KEY || ""
-);
+const supabase = createClient(config.supabase.url, config.supabase.key);
 
 export class WalletService {
-  private readonly encryptionKey: string;
+  private readonly encryptionKey: Buffer;
 
   constructor() {
-    this.encryptionKey = process.env.ENCRYPTION_KEY || "";
-    if (!this.encryptionKey) {
+    const key = process.env.ENCRYPTION_KEY;
+    if (!key) {
       throw new Error("ENCRYPTION_KEY is required");
     }
+    // Create a 32-byte key using SHA256
+    this.encryptionKey = crypto.createHash("sha256").update(key).digest();
   }
 
   private encrypt(text: string): string {
     const iv = crypto.randomBytes(16);
-    const cipher = crypto.createCipheriv(
-      "aes-256-cbc",
-      Buffer.from(this.encryptionKey),
-      iv
-    );
+    const cipher = crypto.createCipheriv("aes-256-cbc", this.encryptionKey, iv);
     let encrypted = cipher.update(text, "utf8", "hex");
     encrypted += cipher.final("hex");
     return `${iv.toString("hex")}:${encrypted}`;
@@ -36,7 +32,7 @@ export class WalletService {
     const iv = Buffer.from(ivHex, "hex");
     const decipher = crypto.createDecipheriv(
       "aes-256-cbc",
-      Buffer.from(this.encryptionKey),
+      this.encryptionKey,
       iv
     );
     let decrypted = decipher.update(encryptedHex, "hex", "utf8");

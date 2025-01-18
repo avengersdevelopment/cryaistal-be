@@ -1,17 +1,24 @@
-import { Context, Middleware } from 'telegraf';
-import { supabaseService } from '../services/supabase.service';
+import { Context } from "telegraf";
+import { supabaseService } from "../services/supabase.service";
 
-export const authMiddleware: Middleware<Context> = async (ctx, next) => {
-  if (!ctx.from?.id) {
-    return ctx.reply('Could not identify user.');
-  }
-
+export async function authMiddleware(ctx: Context, next: () => Promise<void>) {
   try {
-    const user = await supabaseService.getUserByTelegramId(ctx.from.id);
-    ctx.state.user = user;
-    return next();
-  } catch (error) {
-    console.error('Auth middleware error:', error);
-    return ctx.reply('An error occurred while authenticating.');
+    if (!ctx.from) {
+      ctx.reply("Could not identify user.");
+      return;
+    }
+
+    const user = await supabaseService.getUserByTelegramId(
+      ctx.from.id.toString()
+    );
+    if (!user) {
+      ctx.reply("Please use /start to register first.");
+      return;
+    }
+
+    await next();
+  } catch (error: any) {
+    console.error("Auth middleware error:", error);
+    ctx.reply("An error occurred while processing your request.");
   }
-};
+}

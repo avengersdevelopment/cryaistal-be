@@ -2,30 +2,60 @@ import { Telegraf } from "telegraf";
 import * as dotenv from "dotenv";
 import { setupStartCommand } from "./commands/start.command";
 import { setupDepositCommand } from "./commands/deposit.command";
-import { setupFollowCommand } from "./commands/follow.command";
+import { setupSubscribeCommand } from "./commands/subscribe.command";
+import { setupUnsubscribeCommand } from "./commands/unsubscribe.command";
 import { setupBalanceCommand } from "./commands/balance.command";
+import { setupPerformanceCommand } from "./commands/performance.command";
+import { authMiddleware } from "./middlewares/auth.middleware";
 
 // Load environment variables
 dotenv.config();
 
 const bot = new Telegraf(process.env.BOT_TOKEN || "");
 
+// Global error handler middleware
+bot.use(async (ctx, next) => {
+  try {
+    await next();
+  } catch (error: any) {
+    console.error("Bot error:", error);
+    ctx.reply("An error occurred while processing your request.");
+  }
+});
+
 // Setup commands
 setupStartCommand(bot);
-setupDepositCommand(bot);
-setupFollowCommand(bot);
-setupBalanceCommand(bot);
 
-// Error handling
-bot.catch((err: any) => {
-  console.error("Bot error:", err);
+// Protected commands (require auth)
+bot.use(authMiddleware);
+setupDepositCommand(bot);
+setupSubscribeCommand(bot);
+setupUnsubscribeCommand(bot);
+setupBalanceCommand(bot);
+setupPerformanceCommand(bot);
+
+// Help command
+bot.command("help", (ctx) => {
+  const message = `🤖 CryAIstal AI Trading Bot Commands:
+
+/start - Initialize your account
+/deposit - Get your wallet address
+/subscribe - Start AI trading (min 0.1 ETH)
+/unsubscribe - Stop AI trading
+/balance - Check wallet balance
+/performance - View trading stats
+/help - Show this message
+
+Need assistance? Just ask me anything!`;
+
+  ctx.reply(message);
 });
 
 // Start bot
 bot
   .launch()
   .then(() => {
-    console.log("Bot started successfully");
+    console.log("CryAIstal AI Trading Bot started successfully! 🚀");
   })
   .catch((error) => {
     console.error("Error starting bot:", error);
