@@ -1,7 +1,7 @@
 import { Wallet } from "ethers";
 
 export enum Chain {
-  ETHEREUM = "ethereum",
+  ETHEREUM = "ETHEREUM",
   BASE = "base",
   POLYGON = "polygon",
   ARBITRUM = "arbitrum",

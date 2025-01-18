@@ -9,9 +9,12 @@ console.log("SUPABASE_URL:", process.env.SUPABASE_URL);
 console.log("SUPABASE_KEY:", process.env.SUPABASE_KEY);
 
 export const config = {
-  botToken: process.env.BOT_TOKEN!,
+  botToken: process.env.BOT_TOKEN || "",
   supabase: {
-    url: process.env.SUPABASE_URL!,
-    key: process.env.SUPABASE_KEY!,
+    url: process.env.SUPABASE_URL || "",
+    key: process.env.SUPABASE_KEY || "",
   },
+  ethereum: {
+    rpc_url: process.env.ETHEREUM_RPC_URL || "https://eth-mainnet.g.alchemy.com/v2/your-api-key"
+  }
 };

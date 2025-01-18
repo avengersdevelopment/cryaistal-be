@@ -7,6 +7,7 @@ import { setupUnsubscribeCommand } from "./commands/unsubscribe.command";
 import { setupBalanceCommand } from "./commands/balance.command";
 import { setupPerformanceCommand } from "./commands/performance.command";
 import { authMiddleware } from "./middlewares/auth.middleware";
+import { setupPositionCommand } from "./commands/position.command";
 
 // Load environment variables
 dotenv.config();
@@ -33,6 +34,7 @@ setupSubscribeCommand(bot);
 setupUnsubscribeCommand(bot);
 setupBalanceCommand(bot);
 setupPerformanceCommand(bot);
+setupPositionCommand(bot);
 
 // Help command
 bot.command("help", (ctx) => {
@@ -43,6 +45,7 @@ bot.command("help", (ctx) => {
 /subscribe - Start AI trading (min 0.1 ETH)
 /unsubscribe - Stop AI trading
 /balance - Check wallet balance
+/position - View active positions and P/L
 /performance - View trading stats
 /help - Show this message
 

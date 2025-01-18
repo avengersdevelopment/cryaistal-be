@@ -50,6 +50,7 @@ Available Commands:
 /subscribe - Start automated trading with our AI
 /balance - Check your wallet balances
 /deposit - Get your deposit address
+/position - View active positions and P/L
 /performance - View your trading performance
 /help - Show detailed information
 
