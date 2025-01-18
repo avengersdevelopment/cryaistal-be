@@ -19,9 +19,13 @@ const txCache = new Map<string, CacheEntry<ethers.TransactionResponse>>();
 const receiptCache = new Map<string, CacheEntry<ethers.TransactionReceipt>>();
 
 // Rate limiting dan optimasi
-const BLOCKS_TO_SKIP = 2; // Skip setiap 2 block untuk mengurangi request
-const MAX_TX_PER_BLOCK = 50; // Batasi transaksi yang diproses
-const CACHE_EXPIRY = 1000 * 60 * 5; // Cache expiry 5 menit
+const BLOCKS_TO_SKIP = 2; // Skip 2 blok untuk mengurangi request
+const MAX_TX_PER_BLOCK = 50; // Kurangi batas transaksi
+const BATCH_SIZE = 15; // Kurangi ukuran batch
+const BATCH_DELAY = 250; // Tingkatkan delay antar batch
+const CACHE_EXPIRY = 1000 * 60 * 5; // 5 menit cache
+const MAX_RETRIES = 3; // Maksimal retry saat rate limit
+const RETRY_DELAY = 1000; // Delay 1 detik sebelum retry
 
 interface TrustedTrader {
   id: string;
@@ -38,10 +42,17 @@ export class TraderService {
   private isTracking: boolean = false;
   private lastProcessedBlock: number = 0;
   private trustedTraderAddresses: Set<string> = new Set();
+  private provider: ethers.JsonRpcProvider;
 
   constructor() {
     this.uniswapService = new UniswapService();
     this.walletService = new WalletService();
+    // Menggunakan HTTP Provider dengan optimasi untuk Quicknode Premium di jaringan BASE
+    this.provider = new ethers.JsonRpcProvider(config.base.rpc_url, {
+      chainId: config.base.chainId,
+      name: 'base',
+      ensAddress: undefined
+    });
   }
 
   // Fungsi untuk membersihkan cache yang expired
@@ -64,113 +75,30 @@ export class TraderService {
     this.isTracking = true;
 
     try {
-      // Get all active traders dan simpan addresses untuk O(1) lookup
       const traders = await this.getTrustedTraders();
       this.trustedTraderAddresses = new Set(
         traders.map(t => t.address.toLowerCase())
       );
 
-      // Setup blockchain listener with retry logic
-      let provider;
-      let retryCount = 0;
-      const maxRetries = 5;
-
-      while (retryCount < maxRetries) {
-        try {
-          console.log(`Attempting to connect to RPC node (attempt ${retryCount + 1}/${maxRetries})...`);
-          provider = new ethers.JsonRpcProvider(config.ethereum.rpc_url);
-
-          // Test connection
-          const network = await provider.getNetwork();
-          console.log(`Successfully connected to network: ${network.name}`);
-          break;
-        } catch (error) {
-          retryCount++;
-          if (retryCount === maxRetries) {
-            throw new Error(`Failed to connect to RPC node after ${maxRetries} attempts`);
-          }
-          console.log(`Connection failed, retrying in 2 seconds...`);
-          await new Promise(resolve => setTimeout(resolve, 2000));
-        }
-      }
-
-      if (!provider) {
-        throw new Error('Failed to initialize provider');
-      }
-
       // Bersihkan cache secara berkala
-      setInterval(() => this.cleanCache(), CACHE_EXPIRY);
+      setInterval(() => this.cleanCache(), CACHE_EXPIRY / 2);
 
-      // Listen to new blocks
-      provider.on('block', async (blockNumber) => {
+      // Listen to new blocks dengan polling yang dioptimalkan
+      this.provider.on('block', async (blockNumber) => {
         try {
-          // Skip blocks untuk rate limiting
           if (blockNumber - this.lastProcessedBlock < BLOCKS_TO_SKIP) {
             return;
           }
           this.lastProcessedBlock = blockNumber;
 
-          console.log(`Processing block ${blockNumber}...`);
-          const block = await provider.getBlock(blockNumber, true);
+          const block = await this.provider.getBlock(blockNumber, true);
           
-          if (!block || !block.transactions || block.transactions.length === 0) {
-            return;
-          }
+          if (!block?.transactions?.length) return;
 
-          console.log(`Found ${block.transactions.length} transactions in block ${blockNumber}`);
-
-          // Batasi jumlah transaksi dan proses secara parallel
+          // Process transactions in batches
           const transactions = block.transactions.slice(0, MAX_TX_PER_BLOCK);
-          await Promise.all(
-            transactions.map(async (txHash: string) => {
-              try {
-                // Check cache first
-                const cachedTx = txCache.get(txHash);
-                let tx: ethers.TransactionResponse | undefined;
+          await this.processBatch(transactions, traders);
 
-                if (cachedTx) {
-                  tx = cachedTx.data;
-                } else {
-                  tx = await provider.getTransaction(txHash);
-                  if (tx) {
-                    txCache.set(txHash, { data: tx, timestamp: Date.now() });
-                  }
-                }
-
-                if (!tx || !this.trustedTraderAddresses.has(tx.from.toLowerCase())) {
-                  return;
-                }
-
-                console.log(`Found transaction ${tx.hash} from trusted trader`);
-
-                // Check cache for receipt
-                const cachedReceipt = receiptCache.get(tx.hash);
-                let receipt: ethers.TransactionReceipt | undefined;
-
-                if (cachedReceipt) {
-                  receipt = cachedReceipt.data;
-                } else {
-                  receipt = await provider.getTransactionReceipt(tx.hash);
-                  if (receipt) {
-                    receiptCache.set(tx.hash, { data: receipt, timestamp: Date.now() });
-                  }
-                }
-
-                if (!receipt) return;
-
-                // Check if transaction interacts with Uniswap V3 Router
-                if (receipt.to?.toLowerCase() === config.uniswap.router.toLowerCase()) {
-                  const trader = traders.find(t => t.address.toLowerCase() === tx.from.toLowerCase());
-                  if (trader) {
-                    console.log(`Processing Uniswap trade from ${trader.name}: ${tx.hash}`);
-                    await this.analyzeTrade(tx, trader);
-                  }
-                }
-              } catch (txError) {
-                console.error(`Error processing transaction ${txHash}:`, txError);
-              }
-            })
-          );
         } catch (error) {
           console.error('Error processing block:', error);
         }
@@ -179,6 +107,72 @@ export class TraderService {
     } catch (error) {
       console.error('Error starting trader tracking:', error);
       this.isTracking = false;
+    }
+  }
+
+  // Fungsi helper untuk retry
+  private async withRetry<T>(operation: () => Promise<T>): Promise<T> {
+    let lastError;
+    for (let i = 0; i < MAX_RETRIES; i++) {
+      try {
+        return await operation();
+      } catch (error: any) {
+        lastError = error;
+        // Check jika error adalah rate limit
+        if (error?.code === -32007 || error?.message?.includes('request limit reached')) {
+          console.log(`Rate limit hit, retry attempt ${i + 1} of ${MAX_RETRIES}`);
+          await new Promise(resolve => setTimeout(resolve, RETRY_DELAY * (i + 1))); // Exponential backoff
+          continue;
+        }
+        throw error; // Throw langsung jika bukan rate limit error
+      }
+    }
+    throw lastError;
+  }
+
+  private async processTransaction(
+    txHash: string,
+    traders: TrustedTrader[]
+  ) {
+    try {
+      const cachedTx = txCache.get(txHash);
+      let tx: ethers.TransactionResponse | null = null;
+
+      if (cachedTx && Date.now() - cachedTx.timestamp < CACHE_EXPIRY) {
+        tx = cachedTx.data;
+      } else {
+        tx = await this.withRetry(() => this.provider.getTransaction(txHash));
+        if (tx) {
+          txCache.set(txHash, { data: tx, timestamp: Date.now() });
+        }
+      }
+
+      if (!tx || !this.trustedTraderAddresses.has(tx.from.toLowerCase())) {
+        return;
+      }
+
+      const cachedReceipt = receiptCache.get(tx.hash);
+      let receipt: ethers.TransactionReceipt | null = null;
+
+      if (cachedReceipt && Date.now() - cachedReceipt.timestamp < CACHE_EXPIRY) {
+        receipt = cachedReceipt.data;
+      } else {
+        receipt = await this.withRetry(() => this.provider.getTransactionReceipt(tx.hash));
+        if (receipt) {
+          receiptCache.set(tx.hash, { data: receipt, timestamp: Date.now() });
+        }
+      }
+
+      if (!receipt) return;
+
+      if (receipt.to?.toLowerCase() === config.base.uniswap.router.toLowerCase()) {
+        const trader = traders.find(t => t.address.toLowerCase() === tx.from.toLowerCase());
+        if (trader) {
+          await this.analyzeTrade(tx, trader);
+        }
+      }
+    } catch (error) {
+      console.error(`Error processing transaction ${txHash}:`, error);
     }
   }
 
@@ -310,5 +304,39 @@ export class TraderService {
       console.error('Error fetching trusted traders:', error);
       return [];
     }
+  }
+
+  // Process transactions in batches with improved rate limiting
+  private async processBatch(transactions: string[], traders: TrustedTrader[]) {
+    console.log(`Processing batch of ${transactions.length} transactions...`);
+    const startTime = Date.now();
+    
+    const results = [];
+    for (let i = 0; i < transactions.length; i += BATCH_SIZE) {
+      const batch = transactions.slice(i, i + BATCH_SIZE);
+      console.log(`Processing sub-batch ${i/BATCH_SIZE + 1} of ${Math.ceil(transactions.length/BATCH_SIZE)}...`);
+      
+      try {
+        const batchResults = await Promise.all(
+          batch.map(txHash => this.processTransaction(txHash, traders))
+        );
+        results.push(...batchResults);
+        
+        // Tambah delay yang lebih lama setelah setiap batch
+        if (i + BATCH_SIZE < transactions.length) {
+          const randomDelay = BATCH_DELAY + Math.floor(Math.random() * 100); // Add random jitter
+          await new Promise(resolve => setTimeout(resolve, randomDelay));
+        }
+      } catch (error) {
+        console.error(`Error processing batch at index ${i}:`, error);
+        // Continue dengan batch berikutnya
+        continue;
+      }
+    }
+
+    const duration = Date.now() - startTime;
+    console.log(`Batch processing completed in ${duration}ms`);
+    
+    return results;
   }
 }

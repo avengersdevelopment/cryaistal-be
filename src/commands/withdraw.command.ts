@@ -18,119 +18,46 @@ export function setupWithdrawCommand(bot: Telegraf<Context>) {
         return;
       }
 
-      const args = ctx.message.text.split(" ");
-      const withdrawAmount = args[1];
-      const toAddress = args[2];
-
-      if (!withdrawAmount || !toAddress) {
-        ctx.reply(`Please provide the amount and destination address.
-
-Format: /withdraw <amount> <address>
-Examples:
-• /withdraw 0.1 0x123...  (withdraw 0.1 ETH)
-• /withdraw all 0x123...  (withdraw entire balance)
-
-⚠️ Make sure to:
-• Double check the destination address
-• Leave some ETH for gas fees (~0.001 ETH)
-• Only send to ETH addresses`);
-        return;
-      }
-
-      // Validate ETH address
-      if (!ethers.isAddress(toAddress)) {
-        ctx.reply("Invalid ETH address. Please check and try again.");
-        return;
-      }
-
       // Get user's wallet
       const { data: wallet } = await supabase
         .from("user_wallets")
         .select("*")
         .eq("user_id", userId)
-        .eq("chain", Chain.ETHEREUM)
+        .eq("chain", Chain.BASE)
         .single();
 
       if (!wallet) {
-        ctx.reply("No wallet found. Please use /start first to create your wallet.");
-        return;
-      }
-
-      // Check if user is subscribed
-      const { data: user } = await supabase
-        .from("users")
-        .select("*")
-        .eq("telegram_id", userId)
-        .single();
-
-      if (user?.is_subscribed) {
-        ctx.reply("⚠️ Please /unsubscribe from trading first before withdrawing.");
+        ctx.reply("No wallet found. Please use /start to create your BASE wallet first.");
         return;
       }
 
       // Get current balance
-      const balance = await walletService.getWalletBalance(userId, Chain.ETHEREUM);
-      const ethBalance = ethers.formatEther(balance);
+      const balance = await walletService.getWalletBalance(userId, Chain.BASE);
+      const formattedBalance = ethers.formatEther(balance);
 
-      // Calculate amount to withdraw
-      let amountToWithdraw: string;
-      if (withdrawAmount.toLowerCase() === 'all') {
-        // Leave some ETH for gas
-        const gasBuffer = 0.001;
-        if (parseFloat(ethBalance) <= gasBuffer) {
-          ctx.reply(`Insufficient balance for withdrawal.
-Current balance: ${ethBalance} ETH
-Minimum required (gas buffer): ${gasBuffer} ETH`);
-          return;
-        }
-        amountToWithdraw = (parseFloat(ethBalance) - gasBuffer).toFixed(6);
-      } else {
-        if (isNaN(parseFloat(withdrawAmount)) || parseFloat(withdrawAmount) <= 0) {
-          ctx.reply("Invalid amount. Please enter a number greater than 0.");
-          return;
-        }
-        amountToWithdraw = withdrawAmount;
-      }
+      await ctx.reply(
+        `To withdraw ETH from your BASE wallet, reply with:
 
-      // Check if amount is valid
-      if (parseFloat(amountToWithdraw) > parseFloat(ethBalance)) {
-        ctx.reply(`Insufficient balance.
-Amount requested: ${amountToWithdraw} ETH
-Current balance: ${ethBalance} ETH`);
-        return;
-      }
+/withdraw <amount> <address>
 
-      // Send confirmation message
-      const confirmMessage = `⚠️ Please confirm withdrawal:
+Example: /withdraw 0.1 0x123...
 
-Amount: ${amountToWithdraw} ETH
-To: ${toAddress}
-Gas buffer: ~0.001 ETH
-Current balance: ${ethBalance} ETH
+Your current balance: ${formattedBalance} ETH
+Network: BASE Mainnet
 
-Reply with /confirm_withdraw to proceed.`;
-
-      // Store withdrawal info in database
-      const expiresAt = new Date();
-      expiresAt.setMinutes(expiresAt.getMinutes() + 5); // 5 minutes expiry
-
-      await supabase.from("pending_withdrawals").upsert([{
-        user_id: userId,
-        amount: amountToWithdraw,
-        to_address: toAddress,
-        expires_at: expiresAt.toISOString()
-      }]);
-
-      await ctx.reply(confirmMessage);
-
-    } catch (error: any) {
+⚠️ Notes:
+• Minimum withdrawal: 0.0001 ETH
+• Keep some ETH for gas fees
+• Double check the address`
+      );
+    } catch (error) {
       console.error("Error in withdraw command:", error);
       ctx.reply("Sorry, something went wrong. Please try again later.");
     }
   });
 
-  // Handle withdrawal confirmation
-  bot.command("confirm_withdraw", async (ctx) => {
+  // Handle withdraw amount and address
+  bot.command(/^withdraw (.+)$/, async (ctx) => {
     try {
       const userId = ctx.from?.id.toString();
       if (!userId) {
@@ -138,52 +65,71 @@ Reply with /confirm_withdraw to proceed.`;
         return;
       }
 
-      // Check if there's a pending withdrawal
-      const { data: withdrawal } = await supabase
-        .from("pending_withdrawals")
-        .select("*")
-        .eq("user_id", userId)
-        .single();
+      const match = ctx.message.text.match(/^\/withdraw (\d*\.?\d*) (0x[a-fA-F0-9]{40})$/);
+      if (!match) {
+        ctx.reply(
+          "Invalid format. Please use:\n/withdraw <amount> <address>\nExample: /withdraw 0.1 0x123..."
+        );
+        return;
+      }
 
-      if (!withdrawal || new Date(withdrawal.expires_at) < new Date()) {
-        ctx.reply("No pending withdrawal or confirmation expired. Please start a new withdrawal.");
+      const [, amount, toAddress] = match;
+
+      // Validate amount
+      const withdrawAmount = parseFloat(amount);
+      if (isNaN(withdrawAmount) || withdrawAmount <= 0) {
+        ctx.reply("Invalid amount. Please enter a positive number.");
+        return;
+      }
+
+      if (withdrawAmount < 0.0001) {
+        ctx.reply("Minimum withdrawal amount is 0.0001 ETH");
+        return;
+      }
+
+      // Validate address
+      if (!ethers.isAddress(toAddress)) {
+        ctx.reply("Invalid ETH address. Please check and try again.");
+        return;
+      }
+
+      // Get current balance
+      const balance = await walletService.getWalletBalance(userId, Chain.BASE);
+      const currentBalance = parseFloat(ethers.formatEther(balance));
+
+      if (withdrawAmount > currentBalance) {
+        ctx.reply(
+          `Insufficient balance. Your current balance is ${currentBalance} ETH`
+        );
         return;
       }
 
       // Execute withdrawal
-      await ctx.reply("Processing withdrawal...");
-      
+      await ctx.reply("Processing your withdrawal...");
+
       const tx = await walletService.withdrawETH(
         userId,
-        Chain.ETHEREUM,
-        withdrawal.to_address,
-        withdrawal.amount
+        Chain.BASE,
+        toAddress,
+        amount
       );
 
-      const message = `✅ Withdrawal successful!
+      await ctx.reply(
+        `✅ Withdrawal successful!
 
-Amount: ${withdrawal.amount} ETH
-To: ${withdrawal.to_address}
+Amount: ${amount} ETH
+To: ${toAddress}
 Transaction: ${tx.hash}
 
-You can track your transaction here:
-https://etherscan.io/tx/${tx.hash}`;
-
-      await ctx.reply(message);
-
-      // Delete pending withdrawal
-      await supabase
-        .from("pending_withdrawals")
-        .delete()
-        .eq("user_id", userId);
-
+Network: BASE Mainnet
+Explorer: https://basescan.org/tx/${tx.hash}`,
+        { parse_mode: "Markdown" }
+      );
     } catch (error: any) {
-      console.error("Error in confirm_withdraw:", error);
-      if (error.message.includes("insufficient funds")) {
-        ctx.reply("Insufficient funds. Please make sure you have enough ETH for the amount plus gas fees.");
-      } else {
-        ctx.reply("Sorry, withdrawal failed. Please try again later.");
-      }
+      console.error("Error processing withdrawal:", error);
+      ctx.reply(
+        `Error processing withdrawal: ${error.message}. Please try again later.`
+      );
     }
   });
 } 

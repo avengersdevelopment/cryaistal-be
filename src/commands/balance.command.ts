@@ -18,33 +18,35 @@ export function setupBalanceCommand(bot: Telegraf<Context>) {
         return;
       }
 
-      // Get user's wallet
+      // Get user's wallet di BASE
       const { data: wallet } = await supabase
         .from("user_wallets")
         .select("*")
         .eq("user_id", userId)
-        .eq("chain", Chain.ETHEREUM)
+        .eq("chain", Chain.BASE)
         .single();
 
       if (!wallet) {
-        ctx.reply("No wallet found. Please use /start to create your wallet.");
+        ctx.reply("No wallet found. Please use /start to create your BASE wallet.");
         return;
       }
 
       try {
         const balance = await walletService.getWalletBalance(
           userId,
-          Chain.ETHEREUM
+          Chain.BASE
         );
         const formattedBalance = ethers.formatEther(balance);
 
-        const message = `💰 Your Wallet Balance:
+        const message = `💰 Your BASE Wallet Balance:
 
 Address: \`${wallet.address}\`
 Balance: ${formattedBalance} ETH
 
 Need more ETH? Use /deposit to get your deposit address.
-Want to start trading? Use /subscribe (min 0.0001 ETH required).`;
+Want to start trading? Use /subscribe (min 0.0001 ETH required).
+
+Network: BASE Mainnet`;
 
         await ctx.reply(message, { parse_mode: "Markdown" });
       } catch (error: any) {

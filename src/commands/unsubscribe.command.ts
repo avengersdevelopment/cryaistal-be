@@ -1,4 +1,5 @@
 import { Telegraf, Context } from "telegraf";
+import { Chain } from "../types";
 import { config } from "../config/config";
 import { createClient } from "@supabase/supabase-js";
 
@@ -13,7 +14,7 @@ export function setupUnsubscribeCommand(bot: Telegraf<Context>) {
         return;
       }
 
-      // Check subscription status
+      // Get user's subscription status
       const { data: user } = await supabase
         .from("users")
         .select("*")
@@ -21,35 +22,32 @@ export function setupUnsubscribeCommand(bot: Telegraf<Context>) {
         .single();
 
       if (!user) {
-        ctx.reply("Please use /start first to create your account.");
+        ctx.reply("User not found. Please use /start first.");
         return;
       }
 
       if (!user.is_subscribed) {
-        ctx.reply("You are not currently subscribed to our trading service.");
+        ctx.reply("You are not currently subscribed to AI trading.");
         return;
       }
 
-      // Deactivate subscription
-      await supabase
+      // Update subscription status
+      const { error } = await supabase
         .from("users")
-        .update({
-          is_subscribed: false,
-          subscription_date: null,
-        })
+        .update({ is_subscribed: false })
         .eq("telegram_id", userId);
 
-      const message = `✅ Successfully unsubscribed from CryAIstal AI Trading.
+      if (error) throw error;
 
-Your wallet will no longer participate in automated trading.
-All current positions remain unchanged.
+      await ctx.reply(
+        `✅ Successfully unsubscribed from AI trading.
 
-You can reactivate trading anytime using /subscribe.
+You can now withdraw your funds using /withdraw command.
+To start trading again, use /subscribe.
 
-Thank you for using CryAIstal! 🙏`;
-
-      ctx.reply(message);
-    } catch (error: any) {
+Network: BASE Mainnet`
+      );
+    } catch (error) {
       console.error("Error in unsubscribe command:", error);
       ctx.reply("Sorry, something went wrong. Please try again later.");
     }

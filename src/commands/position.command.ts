@@ -51,10 +51,19 @@ export function setupPositionCommand(bot: Telegraf<Context>) {
         .eq("is_active", true);
 
       if (!positions || positions.length === 0) {
-        ctx.reply(`No active positions found.
+        try {
+          const balance = await walletService.getWalletBalance(userId, Chain.BASE);
+          const formattedBalance = ethers.formatEther(balance);
+          
+          await ctx.reply(`No active positions found.
 
 Trading Amount: ${user.trading_amount} ETH
-Available Balance: ${await getFormattedBalance(userId, walletService)} ETH`);
+Available Balance: ${formattedBalance} ETH
+Network: BASE Mainnet`);
+        } catch (error) {
+          console.error("Error fetching balance:", error);
+          await ctx.reply("Error fetching balance. Please try again later.");
+        }
         return;
       }
 
@@ -102,6 +111,9 @@ Unrealized P/L: ${formatPnl(pos.unrealized_pnl)} (${formatPercentage(pos.pnl_per
         )
         .join("\n\n");
 
+      const balance = await walletService.getWalletBalance(userId, Chain.BASE);
+      const formattedBalance = ethers.formatEther(balance);
+
       const message = `📊 Your Active Positions
 
 ${positionsInfo}
@@ -109,9 +121,10 @@ ${positionsInfo}
 📈 Summary
 Total Unrealized P/L: ${formatPnl(totalPnl.toString())}
 Trading Amount: ${user.trading_amount} ETH
-Available Balance: ${await getFormattedBalance(userId, walletService)} ETH
+Available Balance: ${formattedBalance} ETH
 
 Last Updated: ${new Date().toLocaleString()}
+Network: BASE Mainnet
 
 Use /performance to see your trading history
 Use /unsubscribe to stop copy trading`;
@@ -160,12 +173,4 @@ function formatPercentage(percentage: string): string {
   const num = parseFloat(percentage);
   const sign = num >= 0 ? "+" : "";
   return `${sign}${num.toFixed(2)}%`;
-}
-
-async function getFormattedBalance(
-  userId: string,
-  walletService: WalletService
-): Promise<string> {
-  const balance = await walletService.getWalletBalance(userId, Chain.ETHEREUM);
-  return ethers.formatEther(balance);
 } 

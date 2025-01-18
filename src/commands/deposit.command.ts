@@ -1,11 +1,9 @@
 import { Telegraf, Context } from "telegraf";
 import { Chain } from "../types";
+import { config } from "../config/config";
 import { createClient } from "@supabase/supabase-js";
 
-const supabase = createClient(
-  process.env.SUPABASE_URL || "",
-  process.env.SUPABASE_KEY || ""
-);
+const supabase = createClient(config.supabase.url, config.supabase.key);
 
 export function setupDepositCommand(bot: Telegraf<Context>) {
   bot.command("deposit", async (ctx) => {
@@ -16,41 +14,32 @@ export function setupDepositCommand(bot: Telegraf<Context>) {
         return;
       }
 
-      // Get user's wallets
-      const { data: wallets, error } = await supabase
+      // Get user's wallet
+      const { data: wallet } = await supabase
         .from("user_wallets")
-        .select("chain, address")
-        .eq("user_id", userId);
+        .select("*")
+        .eq("user_id", userId)
+        .eq("chain", Chain.BASE)
+        .single();
 
-      if (error) throw error;
-      if (!wallets || wallets.length === 0) {
-        ctx.reply(
-          "No wallets found. Please use /start to create your wallets."
-        );
+      if (!wallet) {
+        ctx.reply("No wallet found. Please use /start to create your BASE wallet first.");
         return;
       }
 
-      const message = `
-Your deposit addresses:
+      const message = `📥 Your BASE Deposit Address:
 
-${wallets
-  .map(
-    (wallet) => `${wallet.chain.toUpperCase()}:
 \`${wallet.address}\`
-`
-  )
-  .join("\n")}
 
-Important:
-1. Only send tokens on the correct chain
-2. Start with a small test amount
-3. Transactions are irreversible
+⚠️ Important:
+1. Only send ETH on BASE network
+2. Do not send from exchanges
+3. Minimum deposit: 0.0001 ETH
 
-Use /balance to check your balances after depositing.
-`;
+Use /balance to check your balance after deposit.`;
 
-      ctx.reply(message, { parse_mode: "Markdown" });
-    } catch (error: any) {
+      await ctx.reply(message, { parse_mode: "Markdown" });
+    } catch (error) {
       console.error("Error in deposit command:", error);
       ctx.reply("Sorry, something went wrong. Please try again later.");
     }

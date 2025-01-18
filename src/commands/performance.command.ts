@@ -30,12 +30,22 @@ export function setupPerformanceCommand(bot: Telegraf<Context>) {
         return;
       }
 
+      // Get user's wallet
+      const { data: wallet } = await supabase
+        .from("user_wallets")
+        .select("*")
+        .eq("user_id", userId)
+        .eq("chain", Chain.BASE)
+        .single();
+
+      if (!wallet) {
+        ctx.reply("No wallet found. Please use /start to create your BASE wallet first.");
+        return;
+      }
+
       // Get current balance
-      const balance = await walletService.getWalletBalance(
-        userId,
-        Chain.ETHEREUM
-      );
-      const ethBalance = ethers.formatEther(balance);
+      const balance = await walletService.getWalletBalance(userId, Chain.BASE);
+      const currentBalance = ethers.formatEther(balance);
 
       // Get transaction history
       const { data: transactions } = await supabase
@@ -61,7 +71,7 @@ export function setupPerformanceCommand(bot: Telegraf<Context>) {
 
       const message = `📊 CryAIstal Trading Performance
 
-Wallet Balance: ${ethBalance} ETH
+Wallet Balance: ${currentBalance} ETH
 Status: ${user.is_subscribed ? "✅ Active" : "❌ Inactive"}
 ${
   user.subscription_date

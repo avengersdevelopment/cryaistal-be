@@ -1,8 +1,9 @@
 import { Wallet } from "ethers";
 
 export enum Chain {
-  ETHEREUM = "ETHEREUM",
-  POLYGON = "polygon"
+  ETHEREUM = "ethereum",
+  POLYGON = "polygon",
+  BASE = "base"
 }
 
 export interface UserWallet {

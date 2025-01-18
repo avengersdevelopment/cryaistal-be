@@ -45,24 +45,31 @@ Use /unsubscribe to stop automated trading.`;
         return;
       }
 
-      // Check ETH balance first
+      // Check wallet balance
       const balance = await walletService.getWalletBalance(
         userId,
-        Chain.ETHEREUM
+        Chain.BASE
       );
+
       const ethBalance = ethers.formatEther(balance);
-
-      // Always check minimum balance first
       if (parseFloat(ethBalance) < parseFloat(MIN_ETH_REQUIRED)) {
-        const message = `Insufficient ETH balance to start trading.
-
-Required minimum: ${MIN_ETH_REQUIRED} ETH
+        ctx.reply(
+          `Insufficient balance. Minimum required: ${MIN_ETH_REQUIRED} ETH
 Current balance: ${ethBalance} ETH
 
-Please use /deposit to get your wallet address and add more ETH.`;
-        ctx.reply(message);
+Please deposit more ETH using /deposit command.
+Network: BASE Mainnet`
+        );
         return;
       }
+
+      // Get user's wallet
+      const { data: wallet } = await supabase
+        .from("user_wallets")
+        .select("*")
+        .eq("user_id", userId)
+        .eq("chain", Chain.BASE)
+        .single();
 
       const args = ctx.message.text.split(" ");
       const tradingInput = args[1];

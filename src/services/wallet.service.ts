@@ -42,7 +42,14 @@ export class WalletService {
   }
 
   async createWallet(userId: string, chain: Chain): Promise<UserWallet> {
-    const provider = new JsonRpcProvider(CHAIN_CONFIGS[chain].rpc_url);
+    const chainConfig = CHAIN_CONFIGS[chain];
+    const provider = new JsonRpcProvider(
+      chainConfig.rpc_url,
+      {
+        chainId: chainConfig.chainId,
+        name: chainConfig.name.toLowerCase()
+      }
+    );
     const wallet = Wallet.createRandom().connect(provider);
 
     const userWallet: UserWallet = {
@@ -68,7 +75,14 @@ export class WalletService {
     userId: string,
     chain: Chain
   ): Promise<{ wallet: UserWallet; privateKey: string }> {
-    const provider = new JsonRpcProvider(CHAIN_CONFIGS[chain].rpc_url);
+    const chainConfig = CHAIN_CONFIGS[chain];
+    const provider = new JsonRpcProvider(
+      chainConfig.rpc_url,
+      {
+        chainId: chainConfig.chainId,
+        name: chainConfig.name.toLowerCase()
+      }
+    );
     const randomWallet = Wallet.createRandom();
     const wallet = randomWallet.connect(provider);
 
@@ -103,34 +117,39 @@ export class WalletService {
     if (!data) throw new Error("Wallet not found");
 
     const privateKey = this.decrypt(data.encrypted_private_key);
+    const chainConfig = CHAIN_CONFIGS[chain];
 
-    // Get RPC URL based on chain
-    let rpcUrl = CHAIN_CONFIGS[chain].rpc_url;
-    if (chain === Chain.ETHEREUM) {
-      const infuraKey = process.env.INFURA_API_KEY;
-      if (!infuraKey) {
-        throw new Error("INFURA_API_KEY is required for Ethereum network");
+    if (!chainConfig.rpc_url) {
+      throw new Error(`RPC URL not configured for ${chain} network`);
+    }
+
+    // Initialize provider dengan konfigurasi spesifik untuk BASE
+    const provider = new JsonRpcProvider(
+      chainConfig.rpc_url,
+      {
+        chainId: chainConfig.chainId,
+        name: chainConfig.name.toLowerCase()
       }
-      rpcUrl = `https://mainnet.infura.io/v3/${infuraKey}`;
-    }
-
-    if (!rpcUrl) {
-      throw new Error(`RPC URL not configured for chain ${chain}`);
-    }
-
-    // Initialize provider with ENS configuration
-    const provider = new JsonRpcProvider(rpcUrl, {
-      name: 'mainnet',
-      chainId: 1,
-      ensAddress: '0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e'
-    });
+    );
 
     try {
-      // Test provider connection
-      await provider.getNetwork();
+      // Test provider connection dengan retry
+      let retryCount = 0;
+      const maxRetries = 3;
+      
+      while (retryCount < maxRetries) {
+        try {
+          await provider.getNetwork();
+          break;
+        } catch (err) {
+          retryCount++;
+          if (retryCount === maxRetries) throw err;
+          await new Promise(resolve => setTimeout(resolve, 1000 * retryCount)); // exponential backoff
+        }
+      }
     } catch (error) {
       console.error(`Provider connection error for ${chain}:`, error);
-      throw new Error(`Could not connect to ${chain} network`);
+      throw new Error(`Could not connect to ${chain} network. Please try again later.`);
     }
 
     return new Wallet(privateKey, provider);
