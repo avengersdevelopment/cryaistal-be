@@ -22,30 +22,6 @@ export function setupSubscribeCommand(bot: Telegraf<Context>) {
         return;
       }
 
-      const args = ctx.message.text.split(" ");
-      const tradingInput = args[1];
-
-      if (!tradingInput) {
-        // Create keyboard markup with percentage options
-        await ctx.reply(`Please select the percentage of your balance to use for trading, or enter a custom amount:
-
-Format for custom amount:
-/subscribe <eth_amount>
-Example: /subscribe 0.05`, {
-          reply_markup: {
-            inline_keyboard: [
-              [
-                { text: "10%", callback_data: "subscribe_10" },
-                { text: "25%", callback_data: "subscribe_25" },
-                { text: "50%", callback_data: "subscribe_50" },
-                { text: "100%", callback_data: "subscribe_100" }
-              ]
-            ]
-          }
-        });
-        return;
-      }
-
       // Check if already subscribed
       const { data: user } = await supabase
         .from("users")
@@ -69,13 +45,14 @@ Use /unsubscribe to stop automated trading.`;
         return;
       }
 
-      // Check ETH balance
+      // Check ETH balance first
       const balance = await walletService.getWalletBalance(
         userId,
         Chain.ETHEREUM
       );
       const ethBalance = ethers.formatEther(balance);
 
+      // Always check minimum balance first
       if (parseFloat(ethBalance) < parseFloat(MIN_ETH_REQUIRED)) {
         const message = `Insufficient ETH balance to start trading.
 
@@ -84,6 +61,37 @@ Current balance: ${ethBalance} ETH
 
 Please use /deposit to get your wallet address and add more ETH.`;
         ctx.reply(message);
+        return;
+      }
+
+      const args = ctx.message.text.split(" ");
+      const tradingInput = args[1];
+
+      if (!tradingInput) {
+        // Calculate amounts for each percentage
+        const percentageAmounts = ALLOWED_PERCENTAGES.map(percent => {
+          const amount = (parseFloat(ethBalance) * (percent / 100)).toFixed(4);
+          return { percent, amount };
+        });
+
+        await ctx.reply(`Please select the percentage of your balance to use for trading, or enter a custom amount:
+
+Your balance: ${ethBalance} ETH
+
+Format for custom amount:
+/subscribe <eth_amount>
+Example: /subscribe 0.05`, {
+          reply_markup: {
+            inline_keyboard: [
+              [
+                { text: "10%", callback_data: "subscribe_10" },
+                { text: "25%", callback_data: "subscribe_25" },
+                { text: "50%", callback_data: "subscribe_50" },
+                { text: "100%", callback_data: "subscribe_100" }
+              ]
+            ]
+          }
+        });
         return;
       }
 
@@ -101,6 +109,18 @@ Please use /deposit to get your wallet address and add more ETH.`;
 
         tradingAmount = (parseFloat(ethBalance) * (percentage / 100)).toFixed(8);
         percentageUsed = percentage;
+
+        // Check if percentage amount meets minimum requirement
+        if (parseFloat(tradingAmount) < parseFloat(MIN_ETH_REQUIRED)) {
+          const message = `Insufficient ETH balance to start trading.
+
+Required minimum: ${MIN_ETH_REQUIRED} ETH
+Current balance: ${ethBalance} ETH
+
+Please use /deposit to get your wallet address and add more ETH.`;
+          ctx.reply(message);
+          return;
+        }
       } else {
         // Handle fixed amount input
         if (isNaN(parseFloat(tradingInput)) || parseFloat(tradingInput) <= 0) {
@@ -112,12 +132,13 @@ Please use /deposit to get your wallet address and add more ETH.`;
       }
 
       if (parseFloat(tradingAmount) > parseFloat(ethBalance)) {
-        ctx.reply(`The ETH amount (${tradingAmount} ETH) exceeds your balance (${ethBalance} ETH).`);
-        return;
-      }
+        const message = `Insufficient ETH balance to start trading.
 
-      if (parseFloat(tradingAmount) < parseFloat(MIN_ETH_REQUIRED)) {
-        ctx.reply(`The trading amount (${tradingAmount} ETH) is below the minimum required (${MIN_ETH_REQUIRED} ETH).`);
+Required minimum: ${MIN_ETH_REQUIRED} ETH
+Current balance: ${ethBalance} ETH
+
+Please use /deposit to get your wallet address and add more ETH.`;
+        ctx.reply(message);
         return;
       }
 
