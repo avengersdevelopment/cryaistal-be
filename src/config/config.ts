@@ -12,14 +12,18 @@ export const config = {
   botToken: process.env.BOT_TOKEN || "",
   supabase: {
     url: process.env.SUPABASE_URL || "",
-    key: process.env.SUPABASE_KEY || "",
+    key: process.env.SUPABASE_KEY || ""
   },
   base: {
-    rpc_url: process.env.QUICKNODE_RPC_URL || "https://falling-sly-mountain.base-mainnet.quiknode.pro/idqucknode",
+    rpc_url: process.env.BASE_RPC_URL || "",
     chainId: 8453,
     uniswap: {
-      router: process.env.UNISWAP_V3_ROUTER || "0x2626664c2603336E57B271c5C0b26F421741e481", // BASE Uniswap v3 Router
-      factory: process.env.UNISWAP_V3_FACTORY || "0x33128a8fC17869897dcE68Ed026d694621f6FDfD" // BASE Uniswap v3 Factory
+      router: process.env.UNISWAP_V3_ROUTER || "",
+      factory: process.env.UNISWAP_V3_FACTORY || ""
     }
+  },
+  quicknode: {
+    rpc_url: process.env.QUICKNODE_RPC_URL || "",
+    ws_url: process.env.QUICKNODE_WS_URL || ""
   }
 };
