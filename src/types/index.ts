@@ -55,3 +55,8 @@ export interface ChainConfig {
     decimals: number;
   };
 }
+
+export interface UserData {
+  telegram_id: string;
+  created_at: string;
+}

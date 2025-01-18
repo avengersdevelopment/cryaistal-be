@@ -27,11 +27,28 @@ export function setupStartCommand(bot: Telegraf<Context>) {
         .single();
 
       if (existingUser) {
-        ctx.reply(`Welcome back! Use /help to see available commands.`);
+        // Ambil wallet yang sudah ada
+        const chains = Object.values(Chain);
+        const wallets = await Promise.all(
+          chains.map(async (chain) => {
+            const wallet = await walletService.getWallet(userId, chain);
+            return `${chain.toUpperCase()}: \`${wallet.address}\``;
+          })
+        );
+
+        const message = `
+🏦 *Wallet Anda:*
+
+${wallets.join('\n')}
+
+Gunakan /deposit untuk melihat QR code deposit
+Gunakan /balance untuk cek saldo
+`;
+        ctx.replyWithMarkdown(message);
         return;
       }
 
-      // Create user record
+      // Buat user baru
       await supabase.from("users").insert([
         {
           telegram_id: userId,
@@ -39,38 +56,40 @@ export function setupStartCommand(bot: Telegraf<Context>) {
         },
       ]);
 
-      // Create wallets for supported chains
+      // Generate wallet untuk semua chain yang didukung
       const chains = Object.values(Chain);
-      for (const chain of chains) {
-        await walletService.createWallet(userId, chain);
-      }
+      const generatedWallets = await Promise.all(
+        chains.map(async (chain) => {
+          const wallet = await walletService.createWallet(userId, chain);
+          return `${chain.toUpperCase()}: \`${wallet.address}\``;
+        })
+      );
 
       const message = `
-Welcome to the Copy Trading Bot! 🚀
+🎉 *Selamat Datang di Copy Trading Bot!*
 
-I've created wallets for you on all supported chains:
-${chains.map((chain) => `- ${chain.toUpperCase()}`).join("\n")}
+✨ Wallet Anda telah berhasil digenerate:
 
-Available commands:
-/deposit - Get your deposit addresses
-/follow <address> - Start following a trader
-/unfollow <address> - Stop following a trader
-/balance - Check your balances
-/traders - List active traders
-/help - Show this help message
+${generatedWallets.join('\n')}
 
-Please note:
-1. Always verify addresses before sending funds
-2. Start with small amounts to test
-3. Trading involves risk - never invest more than you can afford to lose
+*Perintah yang tersedia:*
+📥 /deposit - Lihat QR code deposit
+💰 /balance - Cek saldo
+👥 /follow <address> - Ikuti trader
+❌ /unfollow <address> - Berhenti mengikuti
+📊 /traders - Lihat daftar trader
+ℹ️ /help - Bantuan
 
-Need help? Use /help for command details.
+*Catatan Penting:*
+• Selalu verifikasi alamat sebelum deposit
+• Mulai dengan jumlah kecil untuk testing
+• Trading memiliki risiko - trade dengan bijak
 `;
 
-      ctx.reply(message);
+      ctx.replyWithMarkdown(message);
     } catch (error: any) {
       console.error("Error in start command:", error);
-      ctx.reply("Sorry, something went wrong. Please try again later.");
+      ctx.reply("Maaf, terjadi kesalahan. Silakan coba lagi nanti.");
     }
   });
 }
