@@ -8,6 +8,7 @@ import { setupBalanceCommand } from "./commands/balance.command";
 import { setupPerformanceCommand } from "./commands/performance.command";
 import { authMiddleware } from "./middlewares/auth.middleware";
 import { setupPositionCommand } from "./commands/position.command";
+import { setupWithdrawCommand } from "./commands/withdraw.command";
 
 // Load environment variables
 dotenv.config();
@@ -35,6 +36,7 @@ setupUnsubscribeCommand(bot);
 setupBalanceCommand(bot);
 setupPerformanceCommand(bot);
 setupPositionCommand(bot);
+setupWithdrawCommand(bot);
 
 // Help command
 bot.command("help", (ctx) => {
@@ -47,6 +49,7 @@ bot.command("help", (ctx) => {
 /balance - Check wallet balance
 /position - View active positions and P/L
 /performance - View trading stats
+/withdraw - Withdraw your ETH
 /help - Show this message
 
 Need assistance? Just ask me anything!`;

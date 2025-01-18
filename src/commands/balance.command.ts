@@ -44,7 +44,7 @@ Address: \`${wallet.address}\`
 Balance: ${formattedBalance} ETH
 
 Need more ETH? Use /deposit to get your deposit address.
-Want to start trading? Use /subscribe (min 0.1 ETH required).`;
+Want to start trading? Use /subscribe (min 0.0001 ETH required).`;
 
         await ctx.reply(message, { parse_mode: "Markdown" });
       } catch (error: any) {

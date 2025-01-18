@@ -2,9 +2,7 @@ import { Wallet } from "ethers";
 
 export enum Chain {
   ETHEREUM = "ETHEREUM",
-  BASE = "base",
-  POLYGON = "polygon",
-  ARBITRUM = "arbitrum",
+  POLYGON = "polygon"
 }
 
 export interface UserWallet {
@@ -46,14 +44,14 @@ export interface PnLRecord {
 }
 
 export interface ChainConfig {
+  name: string;
   chainId: number;
-  rpcUrl: string;
+  rpc_url: string;
+  explorer_url: string;
+  symbol: string;
+  decimals: number;
   router: string;
   factory: string;
-  nativeCurrency: {
-    symbol: string;
-    decimals: number;
-  };
 }
 
 export interface TrustedTrader {

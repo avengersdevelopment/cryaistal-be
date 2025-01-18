@@ -7,6 +7,7 @@ CREATE TABLE users (
     telegram_id TEXT UNIQUE NOT NULL,
     is_subscribed BOOLEAN DEFAULT false,
     subscription_date TIMESTAMP WITH TIME ZONE,
+    trading_amount TEXT,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
@@ -116,4 +117,36 @@ CREATE INDEX idx_trader_followers_user_id ON trader_followers(user_id);
 CREATE INDEX idx_trader_followers_trader_address ON trader_followers(trader_address);
 CREATE INDEX idx_transactions_user_id ON transactions(user_id);
 CREATE INDEX idx_transactions_trader_id ON transactions(trader_id);
-CREATE INDEX idx_transactions_chain_status ON transactions(chain, status); 
+CREATE INDEX idx_transactions_chain_status ON transactions(chain, status);
+
+-- Insert trusted traders
+INSERT INTO trusted_traders (
+    address,
+    chain,
+    name,
+    description,
+    min_copy_amount,
+    is_active,
+    total_trades,
+    success_rate
+) VALUES 
+(
+    '0xcbb385321b8be68500493440dbe1a50c8319f6ec',
+    'ETHEREUM',
+    'Alpha Trader 1',
+    'Experienced DeFi trader with focus on mid-cap tokens',
+    '0.0001',
+    true,
+    156,
+    85.5
+),
+(
+    '0x7b402C80Bf4779292c2694f5D86e32d9bF9Fb4Db',
+    'ETHEREUM',
+    'Alpha Trader 2',
+    'Specializes in new token launches and early opportunities',
+    '0.0001',
+    true,
+    203,
+    82.3
+); 

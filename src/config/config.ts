@@ -15,6 +15,10 @@ export const config = {
     key: process.env.SUPABASE_KEY || "",
   },
   ethereum: {
-    rpc_url: process.env.ETHEREUM_RPC_URL || "https://eth-mainnet.g.alchemy.com/v2/your-api-key"
+    rpc_url: process.env.ETH_RPC_URL || process.env.ETHEREUM_RPC_URL || "https://mainnet.infura.io/v3/27c63b1dd92641d6a42dfd87c93d439a"
+  },
+  uniswap: {
+    router: process.env.UNISWAP_V3_ROUTER || "0xE592427A0AEce92De3Edee1F18E0157C05861564",
+    factory: process.env.UNISWAP_V3_FACTORY || "0x1F98431c8aD98523631AE4a59f267346ea31F984"
   }
 };

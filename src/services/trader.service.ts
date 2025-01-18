@@ -1,250 +1,314 @@
-import { JsonRpcProvider, Contract, ethers } from "ethers";
-import { Chain, TraderProfile, Transaction, TrustedTrader } from "../types";
-import { CHAIN_CONFIGS } from "../config/chains";
+import { Telegraf, Context } from "telegraf";
+import { Chain } from "../types";
 import { config } from "../config/config";
 import { createClient } from "@supabase/supabase-js";
-import { WalletService } from "./wallet.service";
+import { ethers } from "ethers";
 import { UniswapService } from "./uniswap.service";
+import { WalletService } from "./wallet.service";
 
 const supabase = createClient(config.supabase.url, config.supabase.key);
 
-const UNISWAP_POOL_ABI = [
-  "event Swap(address indexed sender, address indexed recipient, int256 amount0, int256 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick)",
-];
+// Interface untuk cache entries
+interface CacheEntry<T> {
+  data: T;
+  timestamp: number;
+}
+
+// Cache untuk menyimpan data transaksi
+const txCache = new Map<string, CacheEntry<ethers.TransactionResponse>>();
+const receiptCache = new Map<string, CacheEntry<ethers.TransactionReceipt>>();
+
+// Rate limiting dan optimasi
+const BLOCKS_TO_SKIP = 2; // Skip setiap 2 block untuk mengurangi request
+const MAX_TX_PER_BLOCK = 50; // Batasi transaksi yang diproses
+const CACHE_EXPIRY = 1000 * 60 * 5; // Cache expiry 5 menit
+
+interface TrustedTrader {
+  id: string;
+  name: string;
+  address: string;
+  success_rate: number;
+  total_trades: number;
+  is_active: boolean;
+}
 
 export class TraderService {
-  private walletService: WalletService;
   private uniswapService: UniswapService;
-  private activeTraders: Map<string, Contract> = new Map();
+  private walletService: WalletService;
+  private isTracking: boolean = false;
+  private lastProcessedBlock: number = 0;
+  private trustedTraderAddresses: Set<string> = new Set();
 
   constructor() {
-    this.walletService = new WalletService();
     this.uniswapService = new UniswapService();
+    this.walletService = new WalletService();
+  }
+
+  // Fungsi untuk membersihkan cache yang expired
+  private cleanCache() {
+    const now = Date.now();
+    for (const [key, value] of txCache.entries()) {
+      if (now - value.timestamp > CACHE_EXPIRY) {
+        txCache.delete(key);
+      }
+    }
+    for (const [key, value] of receiptCache.entries()) {
+      if (now - value.timestamp > CACHE_EXPIRY) {
+        receiptCache.delete(key);
+      }
+    }
   }
 
   async startTrackingTrustedTraders() {
-    // Get all active trusted traders from database
-    const { data: traders, error } = await supabase
-      .from("trusted_traders")
-      .select("*")
-      .eq("is_active", true);
+    if (this.isTracking) return;
+    this.isTracking = true;
 
-    if (error) {
-      console.error("Error fetching trusted traders:", error);
-      return;
-    }
-
-    if (!traders || traders.length === 0) {
-      console.log("No active trusted traders found");
-      return;
-    }
-
-    // Start tracking each trader
-    for (const trader of traders) {
-      await this.trackTrader(trader.address, trader.chain as Chain);
-      console.log(
-        `Started tracking trader: ${trader.name} (${trader.address})`
+    try {
+      // Get all active traders dan simpan addresses untuk O(1) lookup
+      const traders = await this.getTrustedTraders();
+      this.trustedTraderAddresses = new Set(
+        traders.map(t => t.address.toLowerCase())
       );
-    }
-  }
 
-  async trackTrader(traderAddress: string, chain: Chain) {
-    const provider = new JsonRpcProvider(CHAIN_CONFIGS[chain].rpcUrl);
-    const factory = new Contract(
-      CHAIN_CONFIGS[chain].factory,
-      UNISWAP_POOL_ABI,
-      provider
-    );
+      // Setup blockchain listener with retry logic
+      let provider;
+      let retryCount = 0;
+      const maxRetries = 5;
 
-    // Store the contract to prevent duplicate listeners
-    const key = `${chain}:${traderAddress}`;
-    if (this.activeTraders.has(key)) {
-      return;
-    }
-    this.activeTraders.set(key, factory);
+      while (retryCount < maxRetries) {
+        try {
+          console.log(`Attempting to connect to RPC node (attempt ${retryCount + 1}/${maxRetries})...`);
+          provider = new ethers.JsonRpcProvider(config.ethereum.rpc_url);
 
-    // Listen for swap events
-    factory.on(
-      "Swap",
-      async (
-        sender,
-        recipient,
-        amount0,
-        amount1,
-        sqrtPrice,
-        liquidity,
-        tick,
-        event
-      ) => {
-        if (sender.toLowerCase() === traderAddress.toLowerCase()) {
-          await this.processTrade({
-            trader: traderAddress,
-            chain,
-            txHash: event.transactionHash,
-            amount0: amount0.toString(),
-            amount1: amount1.toString(),
-          });
+          // Test connection
+          const network = await provider.getNetwork();
+          console.log(`Successfully connected to network: ${network.name}`);
+          break;
+        } catch (error) {
+          retryCount++;
+          if (retryCount === maxRetries) {
+            throw new Error(`Failed to connect to RPC node after ${maxRetries} attempts`);
+          }
+          console.log(`Connection failed, retrying in 2 seconds...`);
+          await new Promise(resolve => setTimeout(resolve, 2000));
         }
       }
-    );
+
+      if (!provider) {
+        throw new Error('Failed to initialize provider');
+      }
+
+      // Bersihkan cache secara berkala
+      setInterval(() => this.cleanCache(), CACHE_EXPIRY);
+
+      // Listen to new blocks
+      provider.on('block', async (blockNumber) => {
+        try {
+          // Skip blocks untuk rate limiting
+          if (blockNumber - this.lastProcessedBlock < BLOCKS_TO_SKIP) {
+            return;
+          }
+          this.lastProcessedBlock = blockNumber;
+
+          console.log(`Processing block ${blockNumber}...`);
+          const block = await provider.getBlock(blockNumber, true);
+          
+          if (!block || !block.transactions || block.transactions.length === 0) {
+            return;
+          }
+
+          console.log(`Found ${block.transactions.length} transactions in block ${blockNumber}`);
+
+          // Batasi jumlah transaksi dan proses secara parallel
+          const transactions = block.transactions.slice(0, MAX_TX_PER_BLOCK);
+          await Promise.all(
+            transactions.map(async (txHash: string) => {
+              try {
+                // Check cache first
+                const cachedTx = txCache.get(txHash);
+                let tx: ethers.TransactionResponse | undefined;
+
+                if (cachedTx) {
+                  tx = cachedTx.data;
+                } else {
+                  tx = await provider.getTransaction(txHash);
+                  if (tx) {
+                    txCache.set(txHash, { data: tx, timestamp: Date.now() });
+                  }
+                }
+
+                if (!tx || !this.trustedTraderAddresses.has(tx.from.toLowerCase())) {
+                  return;
+                }
+
+                console.log(`Found transaction ${tx.hash} from trusted trader`);
+
+                // Check cache for receipt
+                const cachedReceipt = receiptCache.get(tx.hash);
+                let receipt: ethers.TransactionReceipt | undefined;
+
+                if (cachedReceipt) {
+                  receipt = cachedReceipt.data;
+                } else {
+                  receipt = await provider.getTransactionReceipt(tx.hash);
+                  if (receipt) {
+                    receiptCache.set(tx.hash, { data: receipt, timestamp: Date.now() });
+                  }
+                }
+
+                if (!receipt) return;
+
+                // Check if transaction interacts with Uniswap V3 Router
+                if (receipt.to?.toLowerCase() === config.uniswap.router.toLowerCase()) {
+                  const trader = traders.find(t => t.address.toLowerCase() === tx.from.toLowerCase());
+                  if (trader) {
+                    console.log(`Processing Uniswap trade from ${trader.name}: ${tx.hash}`);
+                    await this.analyzeTrade(tx, trader);
+                  }
+                }
+              } catch (txError) {
+                console.error(`Error processing transaction ${txHash}:`, txError);
+              }
+            })
+          );
+        } catch (error) {
+          console.error('Error processing block:', error);
+        }
+      });
+
+    } catch (error) {
+      console.error('Error starting trader tracking:', error);
+      this.isTracking = false;
+    }
   }
 
-  private async processTrade(params: {
-    trader: string;
-    chain: Chain;
-    txHash: string;
-    amount0: string;
-    amount1: string;
-  }) {
-    // Get trusted trader configuration
-    const { data: trustedTrader } = await supabase
-      .from("trusted_traders")
-      .select("*")
-      .eq("address", params.trader)
-      .eq("chain", params.chain)
-      .eq("is_active", true)
-      .single();
+  private async analyzeTrade(tx: ethers.TransactionResponse, trader: TrustedTrader) {
+    try {
+      console.log(`Analyzing trade ${tx.hash} from trader ${trader.name}...`);
 
-    if (!trustedTrader) return;
+      // Get subscribed users
+      const { data: subscribers } = await supabase
+        .from('users')
+        .select('*')
+        .eq('is_subscribed', true);
 
-    // Get subscribed users
-    const { data: users } = await supabase
-      .from("users")
-      .select("telegram_id")
-      .eq("is_subscribed", true);
+      if (!subscribers || subscribers.length === 0) {
+        console.log('No active subscribers found');
+        return;
+      }
 
-    if (!users || users.length === 0) return;
+      console.log(`Found ${subscribers.length} active subscribers`);
 
-    // Copy trade for each subscribed user
-    for (const user of users) {
-      try {
-        // Check user's balance first
-        const balance = await this.walletService.getWalletBalance(
-          user.telegram_id,
-          params.chain
-        );
-        const ethBalance = ethers.formatEther(balance);
-
-        // Skip if user has insufficient balance
-        if (parseFloat(ethBalance) < 0.1) {
-          console.log(
-            `Skipping user ${user.telegram_id} - insufficient balance`
-          );
+      // Copy trade for each subscriber
+      for (const subscriber of subscribers) {
+        try {
+          console.log(`Processing trade for subscriber ${subscriber.telegram_id}`);
+          await this.copyTradeForUser(subscriber.telegram_id, tx, trader);
+        } catch (subError) {
+          console.error(`Error copying trade for subscriber ${subscriber.telegram_id}:`, subError);
+          // Continue with next subscriber
           continue;
         }
-
-        const wallet = await this.walletService.getWallet(
-          user.telegram_id,
-          params.chain
-        );
-
-        let amountToCopy = params.amount0;
-
-        // Apply min/max copy amounts if configured
-        if (trustedTrader.min_copy_amount) {
-          amountToCopy = Math.max(
-            parseFloat(trustedTrader.min_copy_amount),
-            parseFloat(amountToCopy)
-          ).toString();
-        }
-
-        if (trustedTrader.max_copy_amount) {
-          amountToCopy = Math.min(
-            parseFloat(trustedTrader.max_copy_amount),
-            parseFloat(amountToCopy)
-          ).toString();
-        }
-
-        // Ensure amount doesn't exceed user's balance
-        amountToCopy = Math.min(
-          parseFloat(amountToCopy),
-          parseFloat(ethBalance) * 0.95 // Leave some for gas
-        ).toString();
-
-        // Execute the trade
-        const tx = await this.uniswapService.swapExactInputSingle(
-          wallet,
-          params.chain,
-          {
-            tokenIn: "", // Get from transaction trace
-            tokenOut: "", // Get from transaction trace
-            fee: 3000,
-            amountIn: ethers.parseEther(amountToCopy).toString(),
-            amountOutMinimum: "0", // Calculate based on slippage
-          }
-        );
-
-        // Record the transaction
-        await supabase.from("transactions").insert([
-          {
-            user_id: user.telegram_id,
-            trader_id: params.trader,
-            chain: params.chain,
-            tx_hash: tx.hash,
-            amount_in: amountToCopy,
-            status: "completed",
-          },
-        ]);
-
-        // Update trader's stats
-        await this.updateTraderStats(trustedTrader.id, true);
-
-        // Notify user of successful trade
-        // You would implement notification logic here
-      } catch (error: any) {
-        console.error(
-          `Failed to copy trade for user ${user.telegram_id}:`,
-          error
-        );
-        await supabase.from("transactions").insert([
-          {
-            user_id: user.telegram_id,
-            trader_id: params.trader,
-            chain: params.chain,
-            tx_hash: params.txHash,
-            status: "failed",
-            error: error.message,
-          },
-        ]);
-
-        // Update trader's stats
-        await this.updateTraderStats(trustedTrader.id, false);
       }
+
+    } catch (error) {
+      console.error('Error analyzing trade:', error);
+      throw error; // Re-throw to be handled by caller
     }
   }
 
-  private async updateTraderStats(traderId: string, success: boolean) {
-    const { data: trader } = await supabase
-      .from("trusted_traders")
-      .select("total_trades, success_rate")
-      .eq("id", traderId)
-      .single();
+  private async copyTradeForUser(userId: string, tx: ethers.TransactionResponse, trader: TrustedTrader) {
+    try {
+      console.log(`Getting wallet for user ${userId}...`);
+      const userWallet = await this.walletService.getWallet(userId, Chain.ETHEREUM);
+      
+      if (!userWallet) {
+        throw new Error(`Wallet not found for user ${userId}`);
+      }
 
-    if (!trader) return;
+      // Get user's trading amount
+      const { data: user } = await supabase
+        .from('users')
+        .select('trading_amount')
+        .eq('telegram_id', userId)
+        .single();
 
-    const newTotalTrades = trader.total_trades + 1;
-    const successfulTrades = success
-      ? Math.ceil(trader.success_rate * trader.total_trades) + 1
-      : Math.ceil(trader.success_rate * trader.total_trades);
-    const newSuccessRate = (successfulTrades / newTotalTrades) * 100;
+      if (!user?.trading_amount) {
+        throw new Error(`Trading amount not set for user ${userId}`);
+      }
 
-    await supabase
-      .from("trusted_traders")
-      .update({
-        total_trades: newTotalTrades,
-        success_rate: newSuccessRate,
-      })
-      .eq("id", traderId);
+      // Calculate gas estimate
+      const gasEstimate = await userWallet.estimateGas({
+        to: tx.to,
+        data: tx.data,
+        value: tx.value
+      });
+
+      // Add 20% buffer for gas estimate
+      const gasLimit = (gasEstimate * BigInt(120)) / BigInt(100);
+
+      console.log(`Copying trade for user ${userId}...`);
+      console.log(`Transaction details:
+        To: ${tx.to}
+        Value: ${ethers.formatEther(tx.value)} ETH
+        Gas Limit: ${gasLimit.toString()}`);
+
+      // Copy the transaction with user's settings
+      const tradeTx = await userWallet.sendTransaction({
+        to: tx.to,
+        data: tx.data,
+        value: tx.value,
+        gasLimit
+      });
+
+      console.log(`Trade copied successfully. Transaction hash: ${tradeTx.hash}`);
+
+      // Log the trade
+      await this.logTrade(userId, trader.id, tradeTx.hash);
+
+    } catch (error: any) {
+      console.error('Error copying trade for user:', error);
+      
+      // Log failed transaction
+      await supabase.from('transactions').insert({
+        user_id: userId,
+        trader_id: trader.id,
+        chain: Chain.ETHEREUM,
+        tx_hash: tx.hash,
+        status: 'failed',
+        error: error.message
+      });
+
+      throw error; // Re-throw to be handled by caller
+    }
+  }
+
+  private async logTrade(userId: string, traderId: string, txHash: string) {
+    try {
+      await supabase.from('transactions').insert({
+        user_id: userId,
+        trader_id: traderId,
+        chain: Chain.ETHEREUM,
+        tx_hash: txHash,
+        status: 'completed'
+      });
+    } catch (error) {
+      console.error('Error logging trade:', error);
+    }
   }
 
   async getTrustedTraders(): Promise<TrustedTrader[]> {
-    const { data, error } = await supabase
-      .from("trusted_traders")
-      .select("*")
-      .eq("is_active", true)
-      .order("success_rate", { ascending: false });
+    try {
+      const { data: traders, error } = await supabase
+        .from('trusted_traders')
+        .select('*')
+        .eq('is_active', true);
 
-    if (error) throw error;
-    return data || [];
+      if (error) throw error;
+      return traders || [];
+    } catch (error) {
+      console.error('Error fetching trusted traders:', error);
+      return [];
+    }
   }
 }

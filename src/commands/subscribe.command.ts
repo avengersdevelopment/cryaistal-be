@@ -7,7 +7,7 @@ import { createClient } from "@supabase/supabase-js";
 import { ethers } from "ethers";
 
 const supabase = createClient(config.supabase.url, config.supabase.key);
-const MIN_ETH_REQUIRED = "0.01"; // Minimum lowered to 0.01 ETH
+const MIN_ETH_REQUIRED = "0.0001"; // Minimum lowered to 0.0001 ETH
 const ALLOWED_PERCENTAGES = [10, 25, 50, 100];
 
 export function setupSubscribeCommand(bot: Telegraf<Context>) {
@@ -153,7 +153,7 @@ Please use /deposit to get your wallet address and add more ETH.`;
       }
 
       // Activate subscription
-      await supabase
+      const { error: updateError } = await supabase
         .from("users")
         .update({
           is_subscribed: true,
@@ -161,6 +161,22 @@ Please use /deposit to get your wallet address and add more ETH.`;
           trading_amount: tradingAmount
         })
         .eq("telegram_id", userId);
+
+      if (updateError) {
+        console.error("Error updating subscription status:", updateError);
+        throw updateError;
+      }
+
+      console.log(`Successfully updated subscription for user ${userId}`);
+
+      // Double check subscription status
+      const { data: updatedUser } = await supabase
+        .from("users")
+        .select("*")
+        .eq("telegram_id", userId)
+        .single();
+
+      console.log("Updated user data:", updatedUser);
 
       const tradersInfo = trustedTraders
         .map(

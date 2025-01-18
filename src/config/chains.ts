@@ -4,43 +4,23 @@ const INFURA_KEY = process.env.INFURA_API_KEY;
 
 export const CHAIN_CONFIGS: Record<Chain, ChainConfig> = {
   [Chain.ETHEREUM]: {
+    name: 'Ethereum',
     chainId: 1,
-    rpcUrl: INFURA_KEY ? `https://mainnet.infura.io/v3/${INFURA_KEY}` : "",
+    rpc_url: INFURA_KEY ? `https://mainnet.infura.io/v3/${INFURA_KEY}` : "",
+    explorer_url: 'https://etherscan.io',
+    symbol: 'ETH',
+    decimals: 18,
     router: process.env.UNISWAP_V3_ROUTER || "",
-    factory: process.env.UNISWAP_V3_FACTORY || "",
-    nativeCurrency: {
-      symbol: "ETH",
-      decimals: 18,
-    },
-  },
-  [Chain.BASE]: {
-    chainId: 8453,
-    rpcUrl: process.env.BASE_RPC_URL || "",
-    router: process.env.UNISWAP_V3_ROUTER || "",
-    factory: process.env.UNISWAP_V3_FACTORY || "",
-    nativeCurrency: {
-      symbol: "ETH",
-      decimals: 18,
-    },
+    factory: process.env.UNISWAP_V3_FACTORY || ""
   },
   [Chain.POLYGON]: {
+    name: 'Polygon',
     chainId: 137,
-    rpcUrl: process.env.POLYGON_RPC_URL || "",
+    rpc_url: process.env.POLYGON_RPC_URL || "",
+    explorer_url: 'https://polygonscan.com',
+    symbol: 'MATIC',
+    decimals: 18,
     router: process.env.UNISWAP_V3_ROUTER || "",
-    factory: process.env.UNISWAP_V3_FACTORY || "",
-    nativeCurrency: {
-      symbol: "MATIC",
-      decimals: 18,
-    },
-  },
-  [Chain.ARBITRUM]: {
-    chainId: 42161,
-    rpcUrl: process.env.ARBITRUM_RPC_URL || "",
-    router: process.env.UNISWAP_V3_ROUTER || "",
-    factory: process.env.UNISWAP_V3_FACTORY || "",
-    nativeCurrency: {
-      symbol: "ETH",
-      decimals: 18,
-    },
-  },
+    factory: process.env.UNISWAP_V3_FACTORY || ""
+  }
 };
