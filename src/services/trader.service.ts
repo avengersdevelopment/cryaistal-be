@@ -391,9 +391,31 @@ Traders: ${this.trustedTraderAddresses.size}
     if (this.processedTxCache.has(tx.hash)) return;
     
     try {
+      console.log(`
+🔍 PROCESSING TRANSACTION
+=======================
+Hash: ${tx.hash}
+From: ${tx.from}
+To: ${tx.to}
+Data Length: ${tx.data.length}
+=======================`);
+
       // Decode swap data
       const decodedSwap = await this.uniswapService.decodeSwapInput(tx.data);
-      if (!decodedSwap) return;
+      
+      if (!decodedSwap) {
+        console.log('❌ Failed to decode swap data');
+        return;
+      }
+
+      console.log(`
+✅ DECODED SWAP DATA
+==================
+Token In: ${decodedSwap.tokenIn}
+Token Out: ${decodedSwap.tokenOut}
+Fee: ${decodedSwap.fee}
+Amount In: ${decodedSwap.amountIn.toString()} wei
+==================`);
 
       // Cache the transaction
       this.txCache.set(tx.hash, { data: tx, timestamp: Date.now() });
@@ -446,11 +468,32 @@ Amount: ${subscriber.trading_amount} ETH
       // Use subscriber's amount directly without scaling
       const amountIn = ethers.parseEther(subscriber.trading_amount);
 
+      // Verify pool exists
+      const factoryContract = new ethers.Contract(
+        config.base.uniswap.factory,
+        [
+          "function getPool(address tokenA, address tokenB, uint24 fee) external view returns (address pool)",
+        ],
+        this.provider
+      );
+
+      const WETH = "0x4200000000000000000000000000000000000006";
+      const pool = await factoryContract.getPool(
+        WETH,
+        decodedSwap.tokenOut,
+        decodedSwap.fee
+      );
+
+      if (pool === ethers.ZeroAddress) {
+        throw new Error(`No liquidity pool found for token ${decodedSwap.tokenOut}`);
+      }
+
       console.log(`
 💰 TRADE PARAMETERS
 =================
-Token In: ${decodedSwap.tokenIn === "0x4200000000000000000000000000000000000006" ? "WETH" : decodedSwap.tokenIn}
-Token Out: ${decodedSwap.tokenOut === "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" ? "USDC" : decodedSwap.tokenOut}
+Token In: ${decodedSwap.tokenIn === WETH ? "ETH/WETH" : decodedSwap.tokenIn}
+Token Out: ${decodedSwap.tokenOut}
+Pool Address: ${pool}
 Amount: ${subscriber.trading_amount} ETH
 Fee: ${decodedSwap.fee / 10000}%
 Gas Price: ${ethers.formatUnits(gasPrice || 0, 'gwei')} gwei

@@ -7,7 +7,7 @@ import { config } from "../config/config";
 const DEFAULT_SLIPPAGE = 0.5; // 0.5%
 const MAX_PRICE_IMPACT = 5; // 5%
 const GAS_LIMIT_MULTIPLIER = 1.2;
-const MIN_ETH_FOR_GAS = "0.001"; // Minimum ETH to keep for gas
+const MIN_ETH_FOR_GAS = "0.0002"; // Minimum ETH to keep for gas
 const MAX_RETRIES = 3;
 const RETRY_DELAY = 1000; // 1 second
 
@@ -202,21 +202,22 @@ export class UniswapService {
       // Check ETH balance first
       const balance = await wallet.provider.getBalance(wallet.address);
       const amountInWei = BigInt(params.amountIn);
-      const minRequiredWei = amountInWei + ethers.parseEther("0.0003"); // 0.0003 ETH for gas buffer
+      const minRequiredWei = amountInWei + ethers.parseEther("0.0002"); // Turunkan gas buffer ke 0.0002
 
       console.log(`
-💰 BALANCE CHECK
-==============
+💰 DETAILED BALANCE CHECK
+=======================
 Current Balance: ${ethers.formatEther(balance)} ETH
 Swap Amount: ${ethers.formatEther(amountInWei)} ETH
-Required (with gas): ${ethers.formatEther(minRequiredWei)} ETH
-==============`);
+Required (with buffer): ${ethers.formatEther(minRequiredWei)} ETH
+Available for Gas: ${ethers.formatEther(balance - amountInWei)} ETH
+=======================`);
 
       if (balance < minRequiredWei) {
         throw new Error(`Insufficient balance. You need at least ${ethers.formatEther(minRequiredWei)} ETH (including gas buffer)`);
       }
 
-      // Get router contract
+      // Get router contract with optimized ABI
       const routerContract = new ethers.Contract(
         config.base.uniswap.router,
         [
@@ -228,9 +229,21 @@ Required (with gas): ${ethers.formatEther(minRequiredWei)} ETH
 
       // Get token details
       const WETH = "0x4200000000000000000000000000000000000006";
+      const USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
       const tokenIn = params.tokenIn === ethers.ZeroAddress ? WETH : params.tokenIn;
-      const tokenOut = params.tokenOut;
-      const fee = params.fee;
+      const tokenOut = params.tokenOut || USDC; // Default to USDC if not specified
+      const fee = params.fee || 3000; // Default to 0.3% if not specified
+
+      // Validate token addresses
+      if (!ethers.isAddress(tokenIn) || !ethers.isAddress(tokenOut)) {
+        throw new Error('Invalid token address');
+      }
+
+      // Validate fee
+      const validFees = [100, 500, 3000, 10000]; // 0.01%, 0.05%, 0.3%, 1%
+      if (!validFees.includes(fee)) {
+        throw new Error(`Invalid fee. Must be one of: ${validFees.map(f => f/10000)}%`);
+      }
 
       // Get quote with more details
       console.log(`\n💭 Getting quote for swap...`);
@@ -247,8 +260,9 @@ Required (with gas): ${ethers.formatEther(minRequiredWei)} ETH
         0
       );
 
-      // Calculate minimum amount out with 1% slippage
-      const minAmountOut = quoteAmount - (quoteAmount * BigInt(1) / BigInt(100));
+      // Increase slippage to 2% for small trades
+      const slippagePercent = amountInWei < ethers.parseEther("0.001") ? BigInt(2) : BigInt(1);
+      const minAmountOut = quoteAmount - (quoteAmount * slippagePercent / BigInt(100));
 
       // Try to get token decimals for better formatting
       let outDecimals = 18; // default to 18
@@ -263,39 +277,32 @@ Required (with gas): ${ethers.formatEther(minRequiredWei)} ETH
         console.log('Could not get token decimals, using default 18');
       }
 
-      console.log(`
-📊 QUOTE DETAILS
-==============
-Amount In: ${ethers.formatEther(amountInWei)} ETH
-Amount Out: ${ethers.formatUnits(quoteAmount, outDecimals)} Tokens
-Min Amount Out: ${ethers.formatUnits(minAmountOut, outDecimals)} Tokens
-Estimated Gas: ${estimatedGas} units
-==============`);
-
-      // Get latest gas price
+      // Get latest gas price with optimization
       const feeData = await wallet.provider.getFeeData();
-      const gasPrice = feeData.gasPrice || BigInt(0);
+      const baseGasPrice = feeData.gasPrice || BigInt(0);
+      
+      // Optimize gas price - use 90% of current gas price for small trades
+      const gasPrice = amountInWei < ethers.parseEther("0.001") 
+        ? (baseGasPrice * BigInt(90) / BigInt(100))
+        : baseGasPrice;
 
-      // Add 50% buffer to estimated gas
-      const gasLimit = estimatedGas + (estimatedGas * BigInt(50) / BigInt(100));
+      // Use lower gas limit for small trades
+      const gasLimit = amountInWei < ethers.parseEther("0.001")
+        ? estimatedGas + (estimatedGas * BigInt(30) / BigInt(100))  // 30% buffer for small trades
+        : estimatedGas + (estimatedGas * BigInt(50) / BigInt(100)); // 50% buffer for larger trades
 
-      // Calculate total gas cost
-      const gasCost = gasLimit * gasPrice;
       console.log(`
-⛽ GAS DETAILS
-============
+⛽ OPTIMIZED GAS SETTINGS
+=======================
+Base Gas Price: ${ethers.formatUnits(baseGasPrice, 'gwei')} gwei
+Optimized Gas Price: ${ethers.formatUnits(gasPrice, 'gwei')} gwei
+Estimated Gas: ${estimatedGas}
 Gas Limit: ${gasLimit}
-Gas Price: ${ethers.formatUnits(gasPrice, 'gwei')} gwei
-Total Gas Cost: ${ethers.formatEther(gasCost)} ETH
-============`);
+Total Gas Cost: ${ethers.formatEther(gasLimit * gasPrice)} ETH
+=======================`);
 
-      // Verify we have enough for gas
-      if (balance < (amountInWei + gasCost)) {
-        throw new Error(`Insufficient balance for gas. Need ${ethers.formatEther(amountInWei + gasCost)} ETH total`);
-      }
-
-      // Execute swap
-      console.log(`\n🔄 Executing swap...`);
+      // Execute swap with optimized parameters
+      console.log(`\n🔄 Executing swap with optimized parameters...`);
       
       const tx = await routerContract.exactInputSingle(
         {
@@ -309,9 +316,11 @@ Total Gas Cost: ${ethers.formatEther(gasCost)} ETH
           sqrtPriceLimitX96: 0
         },
         {
-          value: params.tokenIn === ethers.ZeroAddress ? amountInWei : 0, // Only send ETH if swapping from ETH
+          value: params.tokenIn === ethers.ZeroAddress ? amountInWei : 0,
           gasLimit,
-          gasPrice
+          gasPrice,
+          maxFeePerGas: undefined, // Disable EIP-1559 for more predictable gas costs
+          maxPriorityFeePerGas: undefined
         }
       );
 
@@ -335,6 +344,8 @@ Total Gas Cost: ${ethers.formatEther(gasCost)} ETH
 Hash: ${receipt.hash}
 Block: ${receipt.blockNumber}
 Gas Used: ${receipt.gasUsed}
+Effective Gas Price: ${ethers.formatUnits(receipt.gasPrice || 0, 'gwei')} gwei
+Total Cost: ${ethers.formatEther(BigInt(receipt.gasPrice || 0) * BigInt(receipt.gasUsed))} ETH
 ================`);
 
       return {
@@ -356,7 +367,7 @@ Gas Used: ${receipt.gasUsed}
         } else if (error.reason) {
           errorMessage = `Transaction would fail: ${error.reason}`;
         } else {
-          errorMessage = 'Transaction would fail: Please check pool liquidity';
+          errorMessage = 'Transaction would fail: Please check pool liquidity and gas settings';
         }
       } else if (error.code === 'INSUFFICIENT_FUNDS') {
         errorMessage = 'Insufficient ETH for transaction';
@@ -438,8 +449,17 @@ Gas Used: ${receipt.gasUsed}
 
   decodeSwapInput(data: string): DecodedSwapInput | null {
     try {
+      console.log(`
+🔍 DECODING TRANSACTION DATA
+=========================
+Data: ${data.slice(0, 66)}...
+Length: ${data.length}
+=========================`);
+
       // Check if this is Universal Router or SwapRouter
       const isUniversalRouter = data.startsWith('0x3593564c'); // execute function selector
+      
+      console.log(`Router Type: ${isUniversalRouter ? 'Universal Router' : 'Swap Router'}`);
       
       if (isUniversalRouter) {
         return this.decodeUniversalRouterInput(data);
@@ -454,6 +474,8 @@ Gas Used: ${receipt.gasUsed}
         return null;
       }
 
+      console.log(`Function Name: ${parsed.name}`);
+
       // Handle different function types
       if (parsed.name === 'exactInputSingle') {
         const params = parsed.args[0];
@@ -462,9 +484,18 @@ Gas Used: ${receipt.gasUsed}
           return null;
         }
 
+        console.log(`
+📝 EXACT INPUT SINGLE PARAMS
+=========================
+Token In: ${params.tokenIn}
+Token Out: ${params.tokenOut}
+Fee: ${params.fee}
+Amount In: ${ethers.formatEther(params.amountIn)} ETH
+=========================`);
+
         return {
-          tokenIn: params.tokenIn,
-          tokenOut: params.tokenOut,
+          tokenIn: ethers.getAddress(params.tokenIn),
+          tokenOut: ethers.getAddress(params.tokenOut),
           fee: params.fee,
           amountIn: params.amountIn,
           amountOutMinimum: params.amountOutMinimum,
@@ -484,10 +515,17 @@ Gas Used: ${receipt.gasUsed}
           const path = params.path;
           const pathData = ethers.getBytes(path);
           
+          console.log(`
+📝 EXACT INPUT (MULTI-HOP) PATH
+============================
+Path Data: ${ethers.hexlify(pathData)}
+Length: ${pathData.length}
+============================`);
+          
           // Get first and last token from path
-          const tokenIn = ethers.hexlify(pathData.slice(0, 20));
+          const tokenIn = ethers.getAddress(ethers.hexlify(pathData.slice(0, 20)));
           const fee = parseInt(ethers.hexlify(pathData.slice(20, 23)).slice(2), 16);
-          const tokenOut = ethers.hexlify(pathData.slice(-20));
+          const tokenOut = ethers.getAddress(ethers.hexlify(pathData.slice(-20)));
 
           return {
             tokenIn,
@@ -562,12 +600,12 @@ Gas Used: ${receipt.gasUsed}
         const pathData = ethers.getBytes(swapInput);
         
         // Extract addresses and fee
-        const tokenIn = ethers.hexlify(pathData.slice(0, 20));
+        const tokenIn = ethers.getAddress(ethers.hexlify(pathData.slice(0, 20)));
         const fee = parseInt(ethers.hexlify(pathData.slice(20, 23)).slice(2), 16);
-        const tokenOut = ethers.hexlify(pathData.slice(23, 43));
+        const tokenOut = ethers.getAddress(ethers.hexlify(pathData.slice(-20)));
         
         // Amount is after path data
-        const amountInData = pathData.slice(43);
+        const amountInData = pathData.slice(43, 75); // Take 32 bytes for amount
         const amountIn = ethers.getBigInt(ethers.hexlify(amountInData));
 
         console.log(`
@@ -575,7 +613,7 @@ Gas Used: ${receipt.gasUsed}
 Token In: ${tokenIn}
 Token Out: ${tokenOut}
 Fee: ${fee}
-Amount In: ${amountIn}
+Amount In: ${amountIn.toString()} wei
         `);
 
         return {
