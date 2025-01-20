@@ -8,31 +8,31 @@ import { WalletService } from "./wallet.service";
 
 const supabase = createClient(config.supabase.url, config.supabase.key);
 
-// Interface untuk cache entries
+// Constants
+const RATE_LIMIT = 50; // Quicknode limit 125, kita set 50 untuk safety
+const REQUEST_WINDOW = 1000; // 1 detik window
+const BLOCK_BATCH_SIZE = 5; // Proses 5 block sekaligus
+const BLOCK_PROCESS_INTERVAL = 2000; // 2 detik interval antar batch
+const REQUEST_QUEUE_SIZE = 100;
+const BATCH_SIZE = 1; // Hanya proses 1 tx per batch
+const BATCH_INTERVAL = 2000; // Naikkan ke 2 detik
+const CACHE_CLEANUP_INTERVAL = 1800000;
+const REQUEST_TIMEOUT = 5000;
+const REQUEST_DELAY = 1000; // Naikkan ke 1 detik
+const MAX_RETRIES = 3;
+const MAX_TX_PER_BLOCK = 50;
+const MIN_TRADE_AMOUNT = "0.0001";
+const MAX_TRADE_AMOUNT = "1";
+const MIN_ETH_FOR_GAS = "0.0003"; // Turunkan gas buffer
+const MIN_BALANCE_BUFFER = "0.0002"; // Turunkan safety buffer
+const MAX_PENDING_TRADES = 5;
+const BATCH_DELAY = 200;
+const MAX_QUEUE_SIZE = 50; // Batasi ukuran queue
+
 interface CacheEntry<T> {
   data: T;
   timestamp: number;
 }
-
-// Cache untuk menyimpan data transaksi
-const txCache = new Map<string, CacheEntry<ethers.TransactionResponse>>();
-const receiptCache = new Map<string, CacheEntry<ethers.TransactionReceipt>>();
-
-// Rate limiting dan optimasi
-const BLOCKS_TO_SKIP = 0; // Tidak skip block
-const MAX_TX_PER_BLOCK = 100; // Tingkatkan batas transaksi
-const BATCH_SIZE = 10; // Ukuran batch yang optimal
-const BATCH_DELAY = 500; // 500ms delay antar batch
-const CACHE_EXPIRY = 1000 * 60 * 5; // 5 menit cache
-const MAX_RETRIES = 5; // Tingkatkan retry limit
-const RETRY_DELAY = 1000; // 1 detik delay retry
-const REQUEST_DELAY = 100; // 100ms delay antar request
-
-// Constants for trade management
-const MIN_TRADE_AMOUNT = "0.0001"; // Minimum trade size in ETH
-const MAX_TRADE_AMOUNT = "1"; // Maximum trade size in ETH
-const MIN_BALANCE_BUFFER = "0.002"; // Keep 0.002 ETH for gas
-const MAX_PENDING_TRADES = 5; // Maximum number of pending trades per user
 
 interface TrustedTrader {
   id: string;
@@ -52,84 +52,603 @@ interface TradeMetrics {
   totalProfitLoss: string;
 }
 
+interface QueuedTrade {
+  userId: string;
+  tx: ethers.TransactionResponse;
+  trader: TrustedTrader;
+  attempts: number;
+  lastAttempt: number;
+}
+
+interface MonitoringState {
+  isActive: boolean;
+  subscriberCount: number;
+  lastCheck: number;
+}
+
+interface RequestQueue {
+  timestamp: number;
+  count: number;
+}
+
 export class TraderService {
   private uniswapService: UniswapService;
   private walletService: WalletService;
   private isTracking: boolean = false;
   private lastProcessedNonces: Map<string, number> = new Map();
   private trustedTraderAddresses: Set<string> = new Set();
-  private provider: ethers.WebSocketProvider;
+  private provider!: ethers.WebSocketProvider; // Use definite assignment assertion
   private pendingTrades: Map<string, number> = new Map(); // userId -> pending trade count
+  private txQueue: Array<{hash: string, blockNumber: number}> = [];
+  private isProcessingQueue = false;
+  private requestCount = 0;
+  private lastResetTime = Date.now();
+  private tradeQueue: QueuedTrade[] = [];
+  private readonly QUEUE_PROCESS_INTERVAL = 1000; // 1 detik
+  private readonly MAX_GAS_PRICE = ethers.parseUnits("100", "gwei"); // 100 gwei
+  private queueInterval: NodeJS.Timeout | null = null;
+  private readonly PENDING_TX_BATCH_SIZE = 5; // Batasi jumlah transaksi pending yang diproses
+  private readonly PENDING_TX_INTERVAL = 2000; // Naikkan ke 2 detik
+  private pendingTxQueue: string[] = [];
+  private isProcessingPendingTx = false;
+  private readonly SWAP_ROUTER: string;
+  private readonly UNIVERSAL_ROUTER: string;
+  private txCache: Map<string, CacheEntry<ethers.TransactionResponse>>;
+  private receiptCache: Map<string, CacheEntry<ethers.TransactionReceipt>>;
+  private processedTxCache: Map<string, boolean>;
+  private readonly rateLimit: number = RATE_LIMIT;
+  private monitoringState: MonitoringState;
+  private swapTopics: string[];
+  private requestQueue: RequestQueue[] = [];
+  private lastProcessedBlock: number = 0;
+  private processingBlocks: boolean = false;
 
   constructor() {
     this.uniswapService = new UniswapService();
     this.walletService = new WalletService();
+    
+    this.txCache = new Map();
+    this.receiptCache = new Map();
+    this.processedTxCache = new Map();
+    this.pendingTxQueue = [];
+    this.isProcessingQueue = false;
+    this.requestCount = 0;
+    this.lastResetTime = Date.now();
+    this.trustedTraderAddresses = new Set();
+    this.SWAP_ROUTER = config.base.uniswap.router.toLowerCase();
+    this.UNIVERSAL_ROUTER = config.base.uniswap.universal_router.toLowerCase();
+    
+    this.monitoringState = {
+      isActive: false,
+      subscriberCount: 0,
+      lastCheck: 0
+    };
 
-    // Gunakan WebSocket provider
-    this.provider = new ethers.WebSocketProvider(config.quicknode.ws_url, {
-      chainId: config.base.chainId,
-      name: "base",
-    });
+    // Pre-compute event topics
+    this.swapTopics = [
+      ethers.id("Swap(address,address,int256,int256,uint160,uint128,int24)"),
+      ethers.id("ExactInputSingle(address,uint256,uint256,uint160)")
+    ];
 
-    // Handle WebSocket reconnection
-    this.setupWebSocketReconnection();
+    this.initializeProvider();
+    this.startQueueProcessor();
+    setInterval(() => this.cleanCache(), CACHE_CLEANUP_INTERVAL);
+    setInterval(() => this.checkSubscribers(), 60000); // Check subscribers every minute
   }
 
-  private setupWebSocketReconnection() {
-    const ws = this.provider.websocket as any;
-
-    ws.on("close", async () => {
-      console.log("WebSocket connection closed. Reconnecting...");
-      await this.reconnectWebSocket();
-    });
-
-    ws.on("error", async (error: any) => {
-      console.error("WebSocket error:", error);
-      await this.reconnectWebSocket();
-    });
-  }
-
-  private async reconnectWebSocket() {
+  private async initializeProvider() {
     try {
-      // Tunggu sebentar sebelum reconnect
-      await new Promise((resolve) => setTimeout(resolve, 5000));
+      this.provider = new ethers.WebSocketProvider(
+        config.quicknode.ws_url,
+        { chainId: config.base.chainId, name: 'base' }
+      );
 
-      // Buat provider baru
-      this.provider = new ethers.WebSocketProvider(config.quicknode.ws_url, {
-        chainId: config.base.chainId,
-        name: "base",
+      console.log(`
+🔌 WEBSOCKET INITIALIZED
+=======================
+Chain: Base
+Time: ${new Date().toLocaleTimeString()}
+=======================`);
+
+      // Setup reconnection logic menggunakan websocket internal
+      const ws = this.provider.websocket as WebSocket;
+      ws.addEventListener('close', () => {
+        console.log('🔄 WebSocket terputus, mencoba reconnect...');
+        setTimeout(() => this.initializeProvider(), 5000);
       });
 
-      // Setup ulang reconnection handler
-      this.setupWebSocketReconnection();
+      // Monitor network events
+      this.provider.on('network', (newNetwork, oldNetwork) => {
+        if (oldNetwork) {
+          console.log('🔄 Network changed, reinitializing connection...');
+          setTimeout(() => this.initializeProvider(), 1000);
+        }
+      });
 
-      // Restart tracking jika sedang aktif
-      if (this.isTracking) {
-        this.isTracking = false;
-        await this.startTrackingTrustedTraders();
-      }
-
-      console.log("WebSocket successfully reconnected");
+      await this.setupMonitoring();
     } catch (error) {
-      console.error("Error reconnecting WebSocket:", error);
-      // Coba reconnect lagi setelah delay
-      setTimeout(() => this.reconnectWebSocket(), 10000);
+      console.error('Provider initialization failed:', error);
+      setTimeout(() => this.initializeProvider(), 5000);
     }
   }
 
-  // Fungsi untuk membersihkan cache yang expired
-  private cleanCache() {
+  private async setupMonitoring() {
+    // Only setup if we have active subscribers
+    const subscribers = await this.getActiveSubscribers();
+    if (subscribers.length === 0) {
+      console.log(`
+💤 MONITORING STOPPED
+===================
+Reason: No active subscribers
+Time: ${new Date().toLocaleTimeString()}
+===================`);
+      
+      // Stop all monitoring
+      this.stopMonitoring();
+      return;
+    }
+
+    // Get trusted traders
+    const traders = await this.getTrustedTraders();
+    this.trustedTraderAddresses = new Set(traders.map(t => t.address.toLowerCase()));
+
+    if (this.trustedTraderAddresses.size === 0) {
+      console.log('⚠️ No trusted traders configured');
+      return;
+    }
+
+    // Remove existing listeners
+    this.provider.removeAllListeners();
+
+    // 1. Monitor ALL pending transactions untuk trusted traders
+    this.provider.on('pending', async (txHash) => {
+      try {
+        if (this.processedTxCache.has(txHash)) return;
+
+        const tx = await this.provider.getTransaction(txHash);
+        if (!tx || !this.trustedTraderAddresses.has(tx.from.toLowerCase())) return;
+
+        // Cek apakah transaksi ke Uniswap router
+        if (tx.to && (
+          tx.to.toLowerCase() === this.SWAP_ROUTER ||
+          tx.to.toLowerCase() === this.UNIVERSAL_ROUTER
+        )) {
+          console.log(`
+📡 PENDING TX DETECTED
+=====================
+Hash: ${txHash}
+From: ${tx.from}
+To: ${tx.to}
+Value: ${ethers.formatEther(tx.value)} ETH
+=====================`);
+          
+          await this.processTraderTransaction(tx);
+        }
+      } catch (error) {
+        if (error instanceof Error && error.message.includes('rate limit')) {
+          console.log('⏳ Rate limit on pending tx, will catch in block monitoring');
+        }
+      }
+    });
+
+    // 2. Monitor specific Uniswap events sebagai backup
+    const swapRouterFilter = {
+      address: this.SWAP_ROUTER,
+      topics: [
+        // Swap events dari SwapRouter
+        ethers.id("Swap(address,address,int256,int256,uint160,uint128,int24)")
+      ]
+    };
+
+    const universalRouterFilter = {
+      address: this.UNIVERSAL_ROUTER,
+      topics: [
+        // Universal Router events
+        ethers.id("ExactInputSingle(address,uint256,uint256,uint160)"),
+        ethers.id("ExactInput(bytes,uint256)")
+      ]
+    };
+
+    // Monitor SwapRouter events
+    this.provider.on(swapRouterFilter, async (log) => {
+      try {
+        if (this.processedTxCache.has(log.transactionHash)) return;
+
+        const tx = await this.provider.getTransaction(log.transactionHash);
+        if (!tx || !this.trustedTraderAddresses.has(tx.from.toLowerCase())) return;
+
+        console.log(`
+✨ SWAP EVENT DETECTED (SwapRouter)
+================================
+Hash: ${log.transactionHash}
+Block: ${log.blockNumber}
+Event: ${log.topics[0]}
+================================`);
+
+        await this.processTraderTransaction(tx);
+      } catch (error) {
+        if (error instanceof Error && error.message.includes('rate limit')) {
+          console.log('⏳ Rate limit on swap event, will catch in block monitoring');
+        }
+      }
+    });
+
+    // Monitor UniversalRouter events
+    this.provider.on(universalRouterFilter, async (log) => {
+      try {
+        if (this.processedTxCache.has(log.transactionHash)) return;
+
+        const tx = await this.provider.getTransaction(log.transactionHash);
+        if (!tx || !this.trustedTraderAddresses.has(tx.from.toLowerCase())) return;
+
+        console.log(`
+✨ SWAP EVENT DETECTED (UniversalRouter)
+=====================================
+Hash: ${log.transactionHash}
+Block: ${log.blockNumber}
+Event: ${log.topics[0]}
+=====================================`);
+
+        await this.processTraderTransaction(tx);
+    } catch (error) {
+        if (error instanceof Error && error.message.includes('rate limit')) {
+          console.log('⏳ Rate limit on swap event, will catch in block monitoring');
+        }
+      }
+    });
+
+    // 3. Block monitoring sebagai final safety net
+    let lastProcessedBlock = await this.provider.getBlockNumber();
+    
+    this.provider.on('block', async (blockNumber) => {
+      try {
+        // Proses block yang terlewat
+        while (lastProcessedBlock < blockNumber) {
+          lastProcessedBlock++;
+          
+          const block = await this.provider.getBlock(lastProcessedBlock, true);
+          if (!block || !block.transactions) continue;
+
+          console.log(`
+🔍 SCANNING BLOCK ${lastProcessedBlock}
+====================================
+Transactions: ${block.transactions.length}
+Timestamp: ${new Date(block.timestamp * 1000).toISOString()}
+====================================`);
+
+          // Proses setiap transaksi dalam block
+          for (const txHash of block.transactions) {
+            try {
+              if (this.processedTxCache.has(txHash)) continue;
+
+              const tx = await this.provider.getTransaction(txHash);
+              if (!tx || !this.trustedTraderAddresses.has(tx.from.toLowerCase())) continue;
+
+              // Cek apakah transaksi ke Uniswap router
+              if (tx.to && (
+                tx.to.toLowerCase() === this.SWAP_ROUTER ||
+                tx.to.toLowerCase() === this.UNIVERSAL_ROUTER
+              )) {
+                console.log(`
+🎯 FOUND TRUSTED TRADER TX IN BLOCK
+=================================
+Hash: ${txHash}
+From: ${tx.from}
+Block: ${lastProcessedBlock}
+=================================`);
+
+                await this.processTraderTransaction(tx);
+      }
+    } catch (error) {
+              if (error instanceof Error && error.message.includes('rate limit')) {
+                // Jika hit rate limit, tunggu dan coba lagi
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                lastProcessedBlock--; // Proses ulang block ini
+                break;
+              }
+            }
+          }
+        }
+      } catch (error) {
+        console.error('Error in block monitoring:', error);
+        // Jika error, mundur satu block untuk dicoba lagi
+        lastProcessedBlock--;
+      }
+    });
+
+    this.monitoringState.isActive = true;
+    this.monitoringState.subscriberCount = subscribers.length;
+    this.monitoringState.lastCheck = Date.now();
+
+    console.log(`
+🎯 TRIPLE MONITORING ACTIVE
+==========================
+1. Pending Transactions ✅
+2. Swap Events ✅
+3. Block Monitoring ✅
+--------------------------
+Subscribers: ${subscribers.length}
+Trusted Traders: ${this.trustedTraderAddresses.size}
+Starting Block: ${lastProcessedBlock}
+==========================`);
+
+    // Start block monitoring
+    this.startBlockMonitoring();
+
+    console.log(`
+🎯 MONITORING ACTIVE
+===================
+Rate Limit: ${RATE_LIMIT} req/sec
+Batch Size: ${BLOCK_BATCH_SIZE} blocks
+Interval: ${BLOCK_PROCESS_INTERVAL}ms
+Subscribers: ${this.monitoringState.subscriberCount}
+Traders: ${this.trustedTraderAddresses.size}
+===================`);
+  }
+
+  private async processTraderTransaction(tx: ethers.TransactionResponse) {
+    // Skip if already processed
+    if (this.processedTxCache.has(tx.hash)) return;
+    
+    try {
+      // Decode swap data
+      const decodedSwap = await this.uniswapService.decodeSwapInput(tx.data);
+      if (!decodedSwap) return;
+
+      // Cache the transaction
+      this.txCache.set(tx.hash, { data: tx, timestamp: Date.now() });
+      this.processedTxCache.set(tx.hash, true);
+
+      // Get active subscribers
+      const subscribers = await this.getActiveSubscribers();
+      
+      // Process for each subscriber
+      for (const subscriber of subscribers) {
+        try {
+          await this.copyTradeForSubscriber(subscriber, tx, decodedSwap);
+        } catch (error) {
+          console.error(`Error copying trade for subscriber ${subscriber.telegram_id}:`, error);
+        }
+      }
+    } catch (error) {
+      console.error('Error processing trader transaction:', error);
+    }
+  }
+
+  private async copyTradeForSubscriber(subscriber: any, tx: ethers.TransactionResponse, decodedSwap: any) {
+    try {
+      console.log(`
+🔄 COPYING TRADE FOR SUBSCRIBER
+=============================
+User ID: ${subscriber.telegram_id}
+Amount: ${subscriber.trading_amount} ETH
+=============================`);
+
+      // Validate trade size and balance first
+      const validation = await this.validateTradeSize(
+        subscriber.telegram_id,
+        subscriber.trading_amount,
+        Chain.BASE
+      );
+
+      if (!validation.valid) {
+        console.log(`❌ Trade validation failed: ${validation.error}`);
+        return;
+      }
+
+      // Get user's wallet
+      const wallet = await this.walletService.getWallet(subscriber.telegram_id, Chain.BASE);
+      
+      // Get latest gas price
+      const feeData = await this.provider.getFeeData();
+      const gasPrice = feeData.gasPrice || undefined;
+
+      // Use subscriber's amount directly without scaling
+      const amountIn = ethers.parseEther(subscriber.trading_amount);
+
+      console.log(`
+💰 TRADE PARAMETERS
+=================
+Token In: ${decodedSwap.tokenIn === "0x4200000000000000000000000000000000000006" ? "WETH" : decodedSwap.tokenIn}
+Token Out: ${decodedSwap.tokenOut === "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" ? "USDC" : decodedSwap.tokenOut}
+Amount: ${subscriber.trading_amount} ETH
+Fee: ${decodedSwap.fee / 10000}%
+Gas Price: ${ethers.formatUnits(gasPrice || 0, 'gwei')} gwei
+=================`);
+
+      // Execute the copy trade
+      const result = await this.uniswapService.swapExactInputSingle(
+        wallet,
+        Chain.BASE,
+        {
+          tokenIn: decodedSwap.tokenIn,
+          tokenOut: decodedSwap.tokenOut,
+          fee: decodedSwap.fee,
+          amountIn: amountIn.toString(),
+          slippage: 1.0,
+          gasPrice
+        }
+      );
+
+      if (result.success) {
+        console.log(`
+✅ COPY TRADE SUCCESSFUL
+======================
+User: ${subscriber.telegram_id}
+Hash: ${result.txHash}
+Amount In: ${subscriber.trading_amount} ETH
+Amount Out: ${ethers.formatUnits(result.amountOut || 0, 6)} USDC
+Gas Used: ${result.gasUsed}
+======================`);
+      } else {
+        console.log(`
+❌ COPY TRADE FAILED
+==================
+User: ${subscriber.telegram_id}
+Error: ${result.error}
+==================`);
+      }
+
+    } catch (error) {
+      console.error(`Error copying trade for subscriber ${subscriber.telegram_id}:`, error);
+    }
+  }
+
+  private async checkSubscribers() {
+    try {
+      const subscribers = await this.getActiveSubscribers();
+      
+      console.log(`
+📊 CHECKING SUBSCRIBERS
+=====================
+Previous Count: ${this.monitoringState.subscriberCount}
+Current Count: ${subscribers.length}
+Time: ${new Date().toLocaleTimeString()}
+=====================`);
+    
+      // Jika tidak ada subscribers dan monitoring masih aktif
+      if (subscribers.length === 0 && this.monitoringState.isActive) {
+        console.log(`
+🛑 STOPPING MONITORING
+====================
+Reason: No active subscribers
+Previous State: Active
+Action: Stopping all processes
+Time: ${new Date().toLocaleTimeString()}
+====================`);
+        
+        // Stop semua proses monitoring
+        this.stopMonitoring();
+        return;
+      }
+      
+      // Jika ada subscribers baru dan monitoring tidak aktif
+      if (subscribers.length > 0 && !this.monitoringState.isActive) {
+        console.log(`
+🚀 STARTING MONITORING
+===================
+Reason: New subscribers detected
+Count: ${subscribers.length}
+Time: ${new Date().toLocaleTimeString()}
+===================`);
+        
+        // Start monitoring
+        await this.setupMonitoring();
+      }
+      
+      // Update subscriber count
+      this.monitoringState.subscriberCount = subscribers.length;
+      this.monitoringState.lastCheck = Date.now();
+      
+    } catch (error) {
+      console.error('Error checking subscribers:', error);
+    }
+  }
+
+  private async getActiveSubscribers() {
+    const { data: subscribers } = await supabase
+      .from("users")
+      .select("*")
+      .eq("is_subscribed", true);
+    
+    return subscribers || [];
+  }
+
+  private async cleanCache(): Promise<void> {
     const now = Date.now();
-    for (const [key, value] of txCache.entries()) {
-      if (now - value.timestamp > CACHE_EXPIRY) {
-        txCache.delete(key);
+    
+    // Bersihkan tx cache
+    for (const [key, value] of this.txCache.entries()) {
+      if (now - value.timestamp > 60000) {
+        this.txCache.delete(key);
       }
     }
-    for (const [key, value] of receiptCache.entries()) {
-      if (now - value.timestamp > CACHE_EXPIRY) {
-        receiptCache.delete(key);
+    
+    // Bersihkan receipt cache
+    for (const [key, value] of this.receiptCache.entries()) {
+      if (now - value.timestamp > 60000) {
+        this.receiptCache.delete(key);
       }
     }
+    
+    // Reset processed tx cache
+    this.processedTxCache.clear();
+    
+    console.log('🧹 Cache dibersihkan');
+  }
+
+  private async processQueue() {
+    if (this.isProcessingQueue || this.txQueue.length === 0) return;
+
+    this.isProcessingQueue = true;
+    
+    while (this.txQueue.length > 0) {
+      // Reset rate limit counter setiap detik
+      const now = Date.now();
+      if (now - this.lastResetTime >= 1000) {
+        this.requestCount = 0;
+        this.lastResetTime = now;
+      }
+
+      // Cek rate limit
+      if (this.requestCount >= this.rateLimit) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        continue;
+      }
+
+      const tx = this.txQueue.shift();
+      if (!tx) continue;
+
+      try {
+        this.requestCount++;
+        const txResponse = await this.provider.getTransaction(tx.hash);
+        if (!txResponse) continue;
+
+        // Cek apakah dari trusted trader
+        if (this.trustedTraderAddresses.has(txResponse.from.toLowerCase())) {
+          console.log(`
+📝 Transaksi dari trusted trader terdeteksi:
+Block: ${tx.blockNumber}
+Hash: ${txResponse.hash}
+From: ${txResponse.from}
+To: ${txResponse.to}
+Value: ${ethers.formatEther(txResponse.value)} ETH
+          `);
+
+          // Coba decode sebagai transaksi Uniswap
+          try {
+            const decodedInput = this.uniswapService.decodeSwapInput(txResponse.data || "");
+            if (decodedInput) {
+              console.log('✅ Transaksi swap Uniswap terdeteksi!');
+              console.log('📊 Decoded input:', JSON.stringify(decodedInput, null, 2));
+
+              const trader = (await this.getTrustedTraders()).find(
+                t => t.address.toLowerCase() === txResponse.from.toLowerCase()
+              );
+              
+              if (trader) {
+                console.log('🔄 Memulai copy trade...');
+                await this.analyzeTrade(txResponse, trader);
+              }
+            }
+          } catch (error) {
+            // Bukan transaksi Uniswap, lanjutkan
+            continue;
+          }
+        }
+      } catch (error: any) {
+        if (error?.error?.code === -32007) {
+          // Rate limit hit, tunggu 1 detik
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          // Masukkan kembali transaksi ke queue
+          this.txQueue.unshift(tx);
+        } else {
+          console.error('Error processing transaction:', error);
+        }
+      }
+    }
+
+    this.isProcessingQueue = false;
   }
 
   async startTrackingTrustedTraders() {
@@ -139,110 +658,60 @@ export class TraderService {
     try {
       const traders = await this.getTrustedTraders();
       this.trustedTraderAddresses = new Set(
-        traders.map((t) => t.address.toLowerCase())
+        traders.map(t => t.address.toLowerCase())
       );
 
-      console.log(
-        "🔄 Mulai tracking trusted traders:",
-        Array.from(this.trustedTraderAddresses)
-      );
-
-      // Inisialisasi nonce terakhir untuk setiap trader
-      for (const trader of traders) {
-        const nonce = await this.provider.getTransactionCount(trader.address);
-        this.lastProcessedNonces.set(trader.address.toLowerCase(), nonce);
-        console.log(`Inisialisasi nonce untuk ${trader.name}: ${nonce}`);
+      if (this.trustedTraderAddresses.size === 0) {
+        console.log('❌ Tidak ada trusted trader yang aktif');
+        return;
       }
 
-      // Subscribe ke pending transactions
-      this.provider.on("pending", async (txHash) => {
+      console.log('🔄 Mulai tracking trusted traders:', Array.from(this.trustedTraderAddresses));
+
+      // Subscribe ke block baru
+      this.provider.on('block', async (blockNumber) => {
         try {
-          const tx = await this.provider.getTransaction(txHash);
-          if (!tx) return;
+          // Ambil block dengan detail transaksi
+          const block = await this.provider.getBlock(blockNumber);
+          if (!block || !block.transactions) return;
 
-          const fromAddress = tx.from.toLowerCase();
-          if (!this.trustedTraderAddresses.has(fromAddress)) return;
-
-          // Cek apakah ini transaksi baru berdasarkan nonce
-          const lastNonce = this.lastProcessedNonces.get(fromAddress) || 0;
-          if (tx.nonce <= lastNonce) return;
-
-          // Update nonce terakhir
-          this.lastProcessedNonces.set(fromAddress, tx.nonce);
-
-          console.log(`🔍 Transaksi baru ditemukan dari trusted trader:
-Hash: ${tx.hash}
-From: ${tx.from}
-To: ${tx.to}
-Value: ${ethers.formatEther(tx.value)} ETH
-Gas Price: ${ethers.formatUnits(tx.gasPrice || 0, "gwei")} gwei
-Nonce: ${tx.nonce}
-`);
-
-          // Tunggu receipt untuk memastikan transaksi berhasil
-          const receipt = await tx.wait();
-          if (!receipt) return;
-
-          if (
-            receipt.to?.toLowerCase() ===
-            config.base.uniswap.router.toLowerCase()
-          ) {
-            const trader = traders.find(
-              (t) => t.address.toLowerCase() === fromAddress
-            );
-            if (trader) {
-              await this.analyzeTrade(tx, trader);
-            }
+          // Tambahkan transaksi ke queue
+          for (const txHash of block.transactions) {
+            this.txQueue.push({ hash: txHash, blockNumber });
           }
-        } catch (error: any) {
-          if (error?.message?.includes("rate limit")) {
-            console.log(
-              "⚠️ Rate limit hit, transaction will be processed in next block"
-            );
-          } else {
-            console.error("Error processing transaction:", error);
+
+          // Mulai proses queue jika belum berjalan
+          if (!this.isProcessingQueue) {
+            this.processQueue();
           }
+
+        } catch (error) {
+          console.error('Error processing block:', error);
         }
       });
 
-      // Subscribe ke new heads untuk backup
-      this.provider.on("block", (blockNumber) => {
-        console.log(`📦 New block: ${blockNumber}`);
-      });
+      console.log('✅ Sistem tracking berhasil dimulai');
+
     } catch (error) {
-      console.error("❌ Error starting trader tracking:", error);
+      console.error('❌ Error starting trader tracking:', error);
       this.isTracking = false;
+      setTimeout(() => this.startTrackingTrustedTraders(), 5000);
     }
   }
 
-  // Fungsi helper untuk retry
-  private async withRetry<T>(
-    operation: () => Promise<T>,
-    customRetryDelay?: number
-  ): Promise<T> {
+  // Fungsi helper untuk retry yang lebih sederhana
+  private async withRetry<T>(operation: () => Promise<T>): Promise<T> {
     let lastError;
     for (let i = 0; i < MAX_RETRIES; i++) {
       try {
-        // Tambah delay kecil sebelum setiap request
-        await new Promise((resolve) => setTimeout(resolve, REQUEST_DELAY));
+        // Tambah delay sederhana
+        await new Promise(resolve => setTimeout(resolve, REQUEST_DELAY));
         return await operation();
       } catch (error: any) {
         lastError = error;
-        // Check jika error adalah rate limit
-        if (
-          error?.code === -32007 ||
-          error?.message?.includes("request limit reached")
-        ) {
-          const delay = customRetryDelay || RETRY_DELAY * Math.pow(2, i); // Exponential backoff
-          console.log(
-            `⚠️ Rate limit hit, retry attempt ${
-              i + 1
-            } of ${MAX_RETRIES}, waiting ${delay}ms`
-          );
-          await new Promise((resolve) => setTimeout(resolve, delay));
-          continue;
-        }
-        throw error;
+        console.error(`Retry attempt ${i + 1} failed:`, error);
+        // Tunggu sebentar sebelum retry
+        await new Promise(resolve => setTimeout(resolve, REQUEST_DELAY * (i + 1)));
       }
     }
     throw lastError;
@@ -263,7 +732,7 @@ Nonce: ${tx.nonce}
       }
 
       // Cache transaksi jika dari trusted trader
-      txCache.set(txHash, { data: tx, timestamp: Date.now() });
+      this.txCache.set(txHash, { data: tx, timestamp: Date.now() });
 
       console.log(`🔍 Transaksi ditemukan dari trusted trader:
 Hash: ${tx.hash}
@@ -280,7 +749,7 @@ Nonce: ${tx.nonce}
       if (!receipt) return;
 
       // Cache receipt
-      receiptCache.set(tx.hash, { data: receipt, timestamp: Date.now() });
+      this.receiptCache.set(tx.hash, { data: receipt, timestamp: Date.now() });
 
       if (
         receipt.to?.toLowerCase() === config.base.uniswap.router.toLowerCase()
@@ -303,37 +772,42 @@ Nonce: ${tx.nonce}
     chain: Chain
   ): Promise<{ valid: boolean; error?: string }> {
     try {
-      // Check minimum trade size
-      if (
-        ethers.parseEther(tradeAmount) < ethers.parseEther(MIN_TRADE_AMOUNT)
-      ) {
+      // Convert all amounts to BigInt
+      const minTradeAmountWei = ethers.parseEther(MIN_TRADE_AMOUNT);
+      const tradeAmountWei = ethers.parseEther(tradeAmount);
+      const gasBufferWei = ethers.parseEther(MIN_ETH_FOR_GAS);
+      const safetyBufferWei = ethers.parseEther(MIN_BALANCE_BUFFER);
+
+      // Check minimum trade size (comparing BigInts)
+      if (tradeAmountWei < minTradeAmountWei) {
         return {
           valid: false,
           error: `Trade amount too small. Minimum: ${MIN_TRADE_AMOUNT} ETH`,
         };
       }
 
-      // Check maximum trade size
-      if (
-        ethers.parseEther(tradeAmount) > ethers.parseEther(MAX_TRADE_AMOUNT)
-      ) {
+      // Get user's balance (already in BigInt)
+      const balanceWei = await this.walletService.getWalletBalance(userId, chain);
+      
+      // Calculate total required (all values are BigInt)
+      const requiredBalanceWei = tradeAmountWei + gasBufferWei + safetyBufferWei;
+
+      console.log(`
+💰 BALANCE VALIDATION
+===================
+Current: ${ethers.formatEther(balanceWei)} ETH
+Required:
+- Trade: ${tradeAmount} ETH
+- Gas: ${MIN_ETH_FOR_GAS} ETH
+- Buffer: ${MIN_BALANCE_BUFFER} ETH
+Total: ${ethers.formatEther(requiredBalanceWei)} ETH
+===================`);
+
+      // Compare BigInt values (both are already BigInt)
+      if (BigInt(balanceWei) < BigInt(requiredBalanceWei)) {
         return {
           valid: false,
-          error: `Trade amount too large. Maximum: ${MAX_TRADE_AMOUNT} ETH`,
-        };
-      }
-
-      // Check user's balance
-      const balance = await this.walletService.getWalletBalance(userId, chain);
-      const requiredBalance =
-        ethers.parseEther(tradeAmount) + ethers.parseEther(MIN_BALANCE_BUFFER);
-
-      if (BigInt(balance) < requiredBalance) {
-        return {
-          valid: false,
-          error: `Insufficient balance. Required: ${ethers.formatEther(
-            requiredBalance
-          )} ETH (including gas buffer)`,
+          error: `Insufficient balance. Required: ${ethers.formatEther(requiredBalanceWei)} ETH (including gas & buffer)`,
         };
       }
 
@@ -434,15 +908,15 @@ Nonce: ${tx.nonce}
   ) {
     try {
       console.log(`
-📊 Analyzing trade from ${trader.name}:
+📊 ANALYZING TRADE
+=================
+Trader: ${trader.name}
 Hash: ${tx.hash}
 From: ${tx.from}
 To: ${tx.to}
 Value: ${ethers.formatEther(tx.value)} ETH
-Gas Price: ${ethers.formatUnits(tx.gasPrice || 0, "gwei")} gwei
-Success Rate: ${trader.success_rate}%
-Total Trades: ${trader.total_trades}
-`);
+Gas Price: ${ethers.formatUnits(tx.gasPrice || 0, 'gwei')} gwei
+=================`);
 
       // Get subscribed users
       const { data: subscribers } = await supabase
@@ -451,122 +925,165 @@ Total Trades: ${trader.total_trades}
         .eq("is_subscribed", true);
 
       if (!subscribers || subscribers.length === 0) {
-        console.log("No active subscribers found");
+        console.log("❌ No active subscribers found");
         return;
       }
 
-      console.log(`Found ${subscribers.length} active subscribers`);
+      console.log(`
+👥 FOUND ${subscribers.length} ACTIVE SUBSCRIBERS
+=============================================`);
 
-      // Process trade for each subscriber
+      // Queue trades for each subscriber
       for (const subscriber of subscribers) {
-        try {
-          // Validate trade size and user's balance
-          const tradeAmount = ethers.formatEther(tx.value);
+        // Skip if queue terlalu penuh
+        if (this.tradeQueue.length >= MAX_QUEUE_SIZE) {
+          console.log('⚠️ Trade queue full, skipping new trades');
+          continue;
+        }
+
+        console.log(`
+🔄 Processing Subscriber: ${subscriber.telegram_id}
+------------------------------------------------`);
+
+        // Validate trade size
           const validation = await this.validateTradeSize(
             subscriber.telegram_id,
-            tradeAmount,
+          subscriber.trading_amount,
             Chain.BASE
           );
 
           if (!validation.valid) {
-            console.log(
-              `Skipping trade for user ${subscriber.telegram_id}: ${validation.error}`
-            );
+          console.log(`❌ Trade skipped: ${validation.error}`);
             continue;
           }
 
-          // Increment pending trades counter
-          this.pendingTrades.set(
-            subscriber.telegram_id,
-            (this.pendingTrades.get(subscriber.telegram_id) || 0) + 1
-          );
+        // Add to queue
+        this.tradeQueue.push({
+          userId: subscriber.telegram_id,
+          tx,
+          trader,
+          attempts: 0,
+          lastAttempt: 0
+        });
 
-          // Copy the trade
-          const result = await this.copyTradeForUser(
-            subscriber.telegram_id,
-            tx,
-            trader
-          );
+        console.log(`✅ Trade queued successfully for user ${subscriber.telegram_id}`);
+      }
 
-          // Decrement pending trades counter
-          this.pendingTrades.set(
-            subscriber.telegram_id,
-            (this.pendingTrades.get(subscriber.telegram_id) || 1) - 1
-          );
+      if (this.tradeQueue.length > 0) {
+        console.log(`
+🎯 TRADE QUEUE STATUS
+===================
+Total Trades: ${this.tradeQueue.length}
+Processing: ${this.isProcessingQueue ? 'Yes ⚡' : 'No ⏸️'}
+===================`);
 
-          // Log metrics
-          if (result.receipt) {
-            await this.logTradeMetrics(
-              subscriber.telegram_id,
-              trader.id,
-              result.receipt.hash,
-              result.success,
-              result.receipt.gasUsed?.toString(),
-              tx.gasPrice?.toString(),
-              result.profitLoss
-            );
-          }
-        } catch (error) {
-          console.error(
-            `Error processing trade for subscriber ${subscriber.telegram_id}:`,
-            error
-          );
-          continue;
+        // Start processing queue if not already running
+        if (!this.isProcessingQueue) {
+          this.processTradeQueue();
         }
       }
     } catch (error) {
-      console.error("Error analyzing trade:", error);
+      console.error('❌ Error analyzing trade:', error);
       throw error;
     }
   }
 
-  private async copyTradeForUser(
-    userId: string,
-    tx: ethers.TransactionResponse,
-    trader: TrustedTrader
-  ): Promise<{
-    success: boolean;
-    receipt?: ethers.TransactionReceipt;
-    profitLoss?: string;
-  }> {
+  private startQueueProcessor() {
+    if (this.queueInterval) {
+      clearInterval(this.queueInterval);
+    }
+
+    this.queueInterval = setInterval(() => {
+      this.processTradeQueue();
+    }, this.QUEUE_PROCESS_INTERVAL);
+  }
+
+  private async processTradeQueue() {
+    if (this.isProcessingQueue || this.tradeQueue.length === 0) return;
+
+    this.isProcessingQueue = true;
+    console.log(`Processing trade queue. Size: ${this.tradeQueue.length}`);
+
     try {
-      console.log(`
-🔄 Copying trade for user ${userId}:
-Trader: ${trader.name}
-Hash Original: ${tx.hash}
-Value: ${ethers.formatEther(tx.value)} ETH
-`);
-
-      const userWallet = await this.walletService.getWallet(userId, Chain.BASE);
-
-      if (!userWallet || !userWallet.provider) {
-        throw new Error(`Wallet not found for user ${userId}`);
+      const currentGasPrice = await this.provider.getFeeData();
+      
+      // Skip jika gas price terlalu tinggi
+      if (currentGasPrice.gasPrice && currentGasPrice.gasPrice > this.MAX_GAS_PRICE) {
+        console.log('Gas price too high, waiting for better conditions...');
+        this.isProcessingQueue = false;
+        return;
       }
 
-      // Get user's trading amount
+      const trade = this.tradeQueue[0];
+      
+      // Skip jika trade terlalu lama dalam queue
+      if (Date.now() - trade.lastAttempt < 10000) { // 10 detik cooldown
+        this.isProcessingQueue = false;
+        return;
+      }
+
+      try {
+        const result = await this.executeCopyTrade(trade);
+        if (result.success) {
+          this.tradeQueue.shift(); // Hapus dari queue jika berhasil
+          console.log(`Successfully executed trade for user ${trade.userId}`);
+        } else {
+          trade.attempts++;
+          trade.lastAttempt = Date.now();
+          
+          if (trade.attempts >= MAX_RETRIES) {
+            console.log(`Failed to execute trade after ${MAX_RETRIES} attempts for user ${trade.userId}`);
+            this.tradeQueue.shift();
+          } else {
+            // Pindahkan ke belakang queue untuk retry nanti
+            this.tradeQueue.push(this.tradeQueue.shift()!);
+          }
+        }
+      } catch (error) {
+        console.error('Error executing trade:', error);
+        trade.attempts++;
+        trade.lastAttempt = Date.now();
+      }
+    } catch (error) {
+      console.error('Error processing trade queue:', error);
+    } finally {
+      this.isProcessingQueue = false;
+    }
+  }
+
+  private async executeCopyTrade(queuedTrade: QueuedTrade) {
+    try {
+      const { userId, tx, trader } = queuedTrade;
+      
+      // Get user's wallet and trading amount
+      const userWallet = await this.walletService.getWallet(userId, Chain.BASE);
       const { data: user } = await supabase
         .from("users")
         .select("trading_amount")
         .eq("telegram_id", userId)
         .single();
 
-      if (!user?.trading_amount) {
-        throw new Error(`Trading amount not set for user ${userId}`);
+      if (!userWallet || !user?.trading_amount) {
+        throw new Error('Invalid user configuration');
       }
 
-      // Decode transaction input to understand the trade
+      // Decode dan validasi trade
       const decodedInput = this.uniswapService.decodeSwapInput(tx.data || "");
       if (!decodedInput) {
-        throw new Error("Could not decode transaction input");
+        throw new Error('Could not decode transaction input');
       }
 
-      // Scale the trade amount based on user's settings
-      const scaledAmount = this.scaleTradeAmount(
-        decodedInput.amountIn.toString(),
-        user.trading_amount
-      );
+      // Validasi trade size dan balance
+      const validation = await this.validateTradeSize(userId, user.trading_amount, Chain.BASE);
+      if (!validation.valid) {
+        throw new Error(validation.error);
+      }
 
-      // Execute the swap
+      // Optimasi gas price
+      const feeData = await this.provider.getFeeData();
+      const optimizedGasPrice = this.optimizeGasPrice(feeData.gasPrice || BigInt(0));
+
+      // Execute swap dengan gas yang dioptimasi
       const swapResult = await this.uniswapService.swapExactInputSingle(
         userWallet,
         Chain.BASE,
@@ -574,34 +1091,37 @@ Value: ${ethers.formatEther(tx.value)} ETH
           tokenIn: decodedInput.tokenIn,
           tokenOut: decodedInput.tokenOut,
           fee: decodedInput.fee,
-          amountIn: scaledAmount,
-          slippage: 1.0, // 1% slippage tolerance
+          amountIn: this.scaleTradeAmount(decodedInput.amountIn.toString(), user.trading_amount),
+          slippage: 1.0,
+          gasPrice: optimizedGasPrice
         }
       );
 
       if (!swapResult.success) {
-        throw new Error(swapResult.error || "Swap failed");
+        throw new Error(swapResult.error);
       }
 
-      const receipt = await userWallet.provider.getTransactionReceipt(
-        swapResult.txHash || ""
+      // Log metrics
+      await this.logTradeMetrics(
+        userId,
+        trader.id,
+        swapResult.txHash!,
+        true,
+        swapResult.gasUsed,
+        optimizedGasPrice.toString(),
+        swapResult.amountOut
       );
-      if (!receipt) {
-        throw new Error("Failed to get transaction receipt");
-      }
 
-      return {
-        success: true,
-        receipt,
-        profitLoss: this.calculateProfitLoss(
-          scaledAmount,
-          swapResult.amountOut || "0"
-        ),
-      };
+      return { success: true };
     } catch (error) {
-      console.error("Error copying trade:", error);
-      return { success: false };
+      console.error('Error executing copy trade:', error);
+      return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
     }
+  }
+
+  private optimizeGasPrice(currentGasPrice: bigint): bigint {
+    // Add 10% to current gas price for faster confirmation
+    return (currentGasPrice * BigInt(110)) / BigInt(100);
   }
 
   private scaleTradeAmount(
@@ -621,17 +1141,6 @@ Value: ${ethers.formatEther(tx.value)} ETH
     } catch (error) {
       console.error("Error scaling trade amount:", error);
       return originalAmount;
-    }
-  }
-
-  private calculateProfitLoss(amountIn: string, amountOut: string): string {
-    try {
-      const input = BigInt(amountIn);
-      const output = BigInt(amountOut);
-      return (output - input).toString();
-    } catch (error) {
-      console.error("Error calculating profit/loss:", error);
-      return "0";
     }
   }
 
@@ -715,4 +1224,394 @@ Value: ${ethers.formatEther(tx.value)} ETH
       return [];
     }
   }
+
+  private async processPendingTransactions() {
+    if (this.isProcessingPendingTx) return;
+    this.isProcessingPendingTx = true;
+
+    try {
+      while (this.pendingTxQueue.length > 0) {
+        // Ambil batch transaksi
+        const batch = this.pendingTxQueue.splice(0, this.PENDING_TX_BATCH_SIZE);
+        
+        // Proses batch dengan delay
+        for (const txHash of batch) {
+          try {
+            // Cek rate limit
+            if (this.requestCount >= this.rateLimit) {
+              console.log('⚠️ Rate limit reached, waiting...');
+              await new Promise(resolve => setTimeout(resolve, 1000));
+              this.requestCount = 0;
+            }
+
+            this.requestCount++;
+            const tx = await this.provider.getTransaction(txHash);
+            
+            if (!tx || !tx.to) continue;
+
+            const toAddress = tx.to.toLowerCase();
+            // Hanya proses transaksi ke Uniswap router
+            if (toAddress === config.base.uniswap.router.toLowerCase() || 
+                toAddress === config.base.uniswap.universal_router.toLowerCase()) {
+              
+              // Cek dari trusted trader
+              if (this.trustedTraderAddresses.has(tx.from.toLowerCase())) {
+                console.log(`
+📡 INCOMING TRANSACTION DETECTED
+==============================
+Router: ${toAddress === config.base.uniswap.router.toLowerCase() ? 'SwapRouter02 📦' : 'UniversalRouter 🌐'}
+Hash: ${tx.hash}
+From: ${tx.from}
+To: ${tx.to}
+Value: ${ethers.formatEther(tx.value)} ETH
+Gas Price: ${ethers.formatUnits(tx.gasPrice || 0, 'gwei')} gwei
+==============================`);
+
+                // Proses transaksi trusted trader
+                await this.handleTrustedTraderTransaction(tx);
+              }
+            }
+          } catch (error: any) {
+            if (error?.error?.code === -32007) {
+              console.log('⚠️ Rate limit hit, pausing...');
+              await new Promise(resolve => setTimeout(resolve, 1000));
+              this.requestCount = 0;
+              // Kembalikan txHash ke queue
+              this.pendingTxQueue.unshift(txHash);
+            } else {
+              console.error('Error processing transaction:', error);
+            }
+          }
+
+          // Delay antara setiap transaksi dalam batch
+          await new Promise(resolve => setTimeout(resolve, this.PENDING_TX_INTERVAL));
+        }
+      }
+    } finally {
+      this.isProcessingPendingTx = false;
+      
+      // Jika masih ada transaksi di queue, proses lagi
+      if (this.pendingTxQueue.length > 0) {
+        setTimeout(() => this.processPendingTransactions(), this.PENDING_TX_INTERVAL);
+      }
+    }
+  }
+
+  private async handleTrustedTraderTransaction(tx: ethers.TransactionResponse) {
+    try {
+      // Decode input untuk memastikan ini swap
+      const decodedInput = await this.uniswapService.decodeSwapInput(tx.data || "");
+      if (!decodedInput) return;
+
+      console.log(`
+🔍 SWAP DETAILS
+==============
+Token In: ${decodedInput.tokenIn === "0x4200000000000000000000000000000000000006" ? 'ETH 💎' : decodedInput.tokenIn}
+Token Out: ${decodedInput.tokenOut === "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" ? 'USDC 💵' : decodedInput.tokenOut}
+Amount In: ${ethers.formatEther(decodedInput.amountIn)} ETH
+==============`);
+
+      // Tunggu konfirmasi dengan timeout
+      console.log(`\n⏳ Waiting for transaction confirmation...`);
+      
+      const receipt = await Promise.race([
+        tx.wait(),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Transaction confirmation timeout')), 60000)
+        ),
+      ]) as ethers.TransactionReceipt;
+
+      if (receipt && 'status' in receipt && receipt.status === 1) {
+        const trader = (await this.getTrustedTraders()).find(
+          t => t.address.toLowerCase() === tx.from.toLowerCase()
+        );
+
+        if (trader) {
+          await this.analyzeTrade(tx, trader);
+        }
+      }
+    } catch (error) {
+      console.error('Error handling trusted trader transaction:', error);
+    }
+  }
+
+  private async processPendingTxQueue(): Promise<void> {
+    if (this.isProcessingQueue || this.pendingTxQueue.length === 0) return;
+    
+    this.isProcessingQueue = true;
+    console.log(`📦 Memproses queue (${this.pendingTxQueue.length} transaksi)`);
+    
+    try {
+      while (this.pendingTxQueue.length > 0) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        
+        const txHash = this.pendingTxQueue.shift();
+        if (!txHash) continue;
+
+        try {
+          if (this.processedTxCache.has(txHash)) {
+            console.log(`⏭️ Skip ${txHash.slice(0, 10)}... (sudah diproses)`);
+            continue;
+          }
+
+          const cachedTx = this.txCache.get(txHash);
+          let tx: ethers.TransactionResponse | null = null;
+
+          if (cachedTx && Date.now() - cachedTx.timestamp < 60000) {
+            tx = cachedTx.data;
+            console.log(`📂 Menggunakan data dari cache untuk ${txHash.slice(0, 10)}...`);
+          } else {
+            if (this.requestCount >= this.rateLimit) {
+              console.log('⚠️ Rate limit tercapai, menunggu 2 detik...');
+              await new Promise(resolve => setTimeout(resolve, 2000));
+              this.requestCount = 0;
+            }
+
+            console.log(`🔄 Fetching tx ${txHash.slice(0, 10)}...`);
+            this.requestCount++;
+            
+            try {
+              // Fetch with timeout
+              tx = await Promise.race([
+                this.provider.getTransaction(txHash),
+                new Promise<null>((_, reject) => {
+                  setTimeout(() => reject(new Error('Request timeout')), 5000);
+                }),
+              ]);
+
+              if (tx) {
+                console.log(`✅ TX ${txHash.slice(0, 10)}... berhasil di-fetch`);
+                this.txCache.set(txHash, { data: tx, timestamp: Date.now() });
+              }
+            } catch (error) {
+              if (error instanceof Error && error.message === 'Request timeout') {
+                console.log(`⏱️ Timeout untuk ${txHash.slice(0, 10)}...`);
+                if (this.pendingTxQueue.length < MAX_QUEUE_SIZE) {
+                  this.pendingTxQueue.push(txHash);
+                }
+              }
+              continue;
+            }
+          }
+
+          if (!tx) continue;
+
+          this.processedTxCache.set(txHash, true);
+
+          // Cek apakah transaksi ke Uniswap router
+          if (tx.to && (
+            tx.to.toLowerCase() === this.SWAP_ROUTER ||
+            tx.to.toLowerCase() === this.UNIVERSAL_ROUTER
+          )) {
+            console.log(`
+🔍 TRANSAKSI TERDETEKSI
+=======================
+📝 Hash: ${tx.hash}
+👤 From: ${tx.from}
+💰 Value: ${ethers.formatEther(tx.value)} ETH
+⛽ Gas Price: ${ethers.formatUnits(tx.gasPrice || 0, 'gwei')} Gwei
+            `);
+
+            // Cek apakah dari trusted trader
+            if (this.trustedTraderAddresses.has(tx.from.toLowerCase())) {
+              console.log(`✨ Transaksi dari Trusted Trader terdeteksi!`);
+              
+              // Tunggu 2 detik sebelum memproses transaksi trusted trader
+              await new Promise(resolve => setTimeout(resolve, 2000));
+              await this.processTransaction(txHash, await this.getTrustedTraders());
+            }
+          }
+
+        } catch (error: unknown) {
+          if (error instanceof Error) {
+            console.error(`❌ Error memproses ${txHash.slice(0, 10)}...`, error.message);
+          }
+        }
+
+        // Tunggu 2 detik sebelum memproses transaksi berikutnya
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      }
+    } finally {
+      this.isProcessingQueue = false;
+      console.log('✅ Queue processing selesai');
+    }
+  }
+
+  private async handlePendingTransactions(txHash: string): Promise<void> {
+    if (this.processedTxCache.has(txHash)) return;
+    
+    this.pendingTxQueue.push(txHash);
+    console.log(`📥 Transaksi ${txHash.slice(0, 10)}... masuk queue (Size: ${this.pendingTxQueue.length})`);
+    
+    await this.processPendingTxQueue();
+  }
+
+  private async throttleRequest(): Promise<void> {
+    // Bersihkan queue yang lebih lama dari 1 detik
+    const now = Date.now();
+    this.requestQueue = this.requestQueue.filter(req => now - req.timestamp < REQUEST_WINDOW);
+    
+    // Hitung total request dalam 1 detik terakhir
+    const totalRequests = this.requestQueue.reduce((sum, req) => sum + req.count, 0);
+    
+    if (totalRequests >= RATE_LIMIT) {
+      // Tunggu sampai window berikutnya
+      const oldestRequest = this.requestQueue[0];
+      const waitTime = REQUEST_WINDOW - (now - oldestRequest.timestamp);
+      await new Promise(resolve => setTimeout(resolve, waitTime));
+      return this.throttleRequest();
+    }
+    
+    // Tambah request ke queue
+    this.requestQueue.push({ timestamp: now, count: 1 });
+  }
+
+  private async processBlockRange(startBlock: number, endBlock: number) {
+    try {
+      console.log(`
+🔄 PROCESSING BLOCKS
+==================
+Start: ${startBlock}
+End: ${endBlock}
+==================`);
+
+      for (let blockNumber = startBlock; blockNumber <= endBlock; blockNumber++) {
+        await this.throttleRequest();
+        
+        try {
+          const block = await this.provider.getBlock(blockNumber, true);
+          if (!block || !block.transactions) continue;
+
+          // Log setiap 20 block
+          if (blockNumber % 20 === 0) {
+            console.log(`
+📦 BLOCK ${blockNumber}
+===================
+Time: ${new Date(block.timestamp * 1000).toISOString()}
+Tx Count: ${block.transactions.length}
+===================`);
+          }
+
+          // Filter transaksi yang relevan
+          const relevantTxs = block.transactions.filter(tx => {
+            if (typeof tx === 'string') return false;
+            
+            const transaction = tx as ethers.TransactionResponse;
+            return this.trustedTraderAddresses.has(transaction.from.toLowerCase()) && (
+              transaction.to?.toLowerCase() === this.SWAP_ROUTER ||
+              transaction.to?.toLowerCase() === this.UNIVERSAL_ROUTER
+            );
+          });
+
+          // Proses transaksi yang relevan
+          for (const tx of relevantTxs) {
+            if (typeof tx !== 'string') {
+              await this.processTraderTransaction(tx as ethers.TransactionResponse);
+            }
+          }
+
+        } catch (error: any) {
+          if (error?.error?.code === -32007) {
+            // Rate limit hit, tunggu dan retry
+            console.log('⏳ Rate limit hit, waiting...');
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            blockNumber--; // Retry block ini
+            continue;
+          }
+          console.error(`Error processing block ${blockNumber}:`, error);
+        }
+      }
+
+      this.lastProcessedBlock = endBlock;
+      
+    } catch (error) {
+      console.error('Error in block range processing:', error);
+    }
+  }
+
+  private async startBlockMonitoring() {
+    if (this.processingBlocks) return;
+    this.processingBlocks = true;
+
+    try {
+      while (this.processingBlocks) { // Check flag in loop condition
+        // Check subscribers setiap 10 block
+        if (this.lastProcessedBlock % 10 === 0) {
+          const subscribers = await this.getActiveSubscribers();
+          if (subscribers.length === 0) {
+            console.log('💤 No active subscribers, stopping block monitoring');
+            this.processingBlocks = false;
+            break;
+          }
+        }
+
+        const currentBlock = await this.provider.getBlockNumber();
+        
+        // Skip jika sudah up to date
+        if (this.lastProcessedBlock >= currentBlock) {
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          continue;
+        }
+
+        // Tentukan range untuk batch berikutnya
+        const startBlock = this.lastProcessedBlock + 1;
+        const endBlock = Math.min(startBlock + BLOCK_BATCH_SIZE - 1, currentBlock);
+
+        await this.processBlockRange(startBlock, endBlock);
+        
+        // Tunggu interval sebelum batch berikutnya
+        await new Promise(resolve => setTimeout(resolve, BLOCK_PROCESS_INTERVAL));
+      }
+    } catch (error) {
+      console.error('Error in block monitoring:', error);
+      this.processingBlocks = false;
+      // Restart monitoring hanya jika masih ada subscribers
+      const subscribers = await this.getActiveSubscribers();
+      if (subscribers.length > 0) {
+        setTimeout(() => this.startBlockMonitoring(), 5000);
+      }
+    }
+  }
+
+  private stopMonitoring() {
+    try {
+      // Stop block monitoring
+      this.processingBlocks = false;
+      
+      // Remove all event listeners
+      this.provider.removeAllListeners();
+      
+      // Reset state
+      this.monitoringState.isActive = false;
+      this.monitoringState.subscriberCount = 0;
+      this.lastProcessedBlock = 0;
+      
+      // Clear all queues
+      this.requestQueue = [];
+      this.pendingTxQueue = [];
+      this.tradeQueue = [];
+      this.txQueue = [];
+      
+      // Clear caches
+      this.txCache.clear();
+      this.receiptCache.clear();
+      this.processedTxCache.clear();
+
+      console.log(`
+✅ MONITORING STOPPED SUCCESSFULLY
+==============================
+Time: ${new Date().toLocaleTimeString()}
+Status:
+- WebSocket: Disconnected
+- Block Monitoring: Stopped
+- Event Listeners: Removed
+- Queues: Cleared
+- Caches: Cleared
+==============================`);
+
+    } catch (error) {
+      console.error('Error stopping monitoring:', error);
+    }
+  }
 }
+

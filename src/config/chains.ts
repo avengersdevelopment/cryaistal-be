@@ -29,7 +29,7 @@ export const CHAIN_CONFIGS: Record<Chain, ChainConfig> = {
     explorer_url: 'https://basescan.org',
     symbol: 'ETH',
     decimals: 18,
-    router: config.base.uniswap.router,
-    factory: config.base.uniswap.factory
+    router: process.env.UNISWAP_V3_ROUTER || "",
+    factory: process.env.UNISWAP_V3_FACTORY || ""
   }
 };

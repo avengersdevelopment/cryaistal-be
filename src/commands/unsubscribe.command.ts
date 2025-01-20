@@ -39,6 +39,21 @@ export function setupUnsubscribeCommand(bot: Telegraf<Context>) {
 
       if (error) throw error;
 
+      // Check if there are any remaining subscribers
+      const { data: activeSubscribers } = await supabase
+        .from("users")
+        .select("telegram_id")
+        .eq("is_subscribed", true);
+
+      const subscriberCount = activeSubscribers?.length || 0;
+      console.log(`
+📊 UNSUBSCRIBE EVENT
+===================
+User: ${userId}
+Remaining Subscribers: ${subscriberCount}
+Time: ${new Date().toLocaleTimeString()}
+===================`);
+
       await ctx.reply(
         `✅ Successfully unsubscribed from AI trading.
 

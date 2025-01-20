@@ -4,10 +4,6 @@ import { resolve } from "path";
 // Load .env file explicitly from project root
 dotenv.config({ path: resolve(__dirname, "../../.env") });
 
-console.log("Loading environment variables...");
-console.log("SUPABASE_URL:", process.env.SUPABASE_URL);
-console.log("SUPABASE_KEY:", process.env.SUPABASE_KEY);
-
 export const config = {
   botToken: process.env.BOT_TOKEN || "",
   supabase: {
@@ -19,7 +15,9 @@ export const config = {
     chainId: 8453,
     uniswap: {
       router: process.env.UNISWAP_V3_ROUTER || "",
-      factory: process.env.UNISWAP_V3_FACTORY || ""
+      factory: process.env.UNISWAP_V3_FACTORY || "",
+      universal_router: process.env.UNIVERSAL_ROUTER || "",
+      permit2: process.env.PERMIT2 || ""
     }
   },
   quicknode: {
