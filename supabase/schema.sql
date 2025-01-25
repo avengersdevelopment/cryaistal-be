@@ -5,6 +5,9 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE TABLE users (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     telegram_id TEXT UNIQUE NOT NULL,
+    first_name TEXT,
+    last_name TEXT,
+    username TEXT,
     is_subscribed BOOLEAN DEFAULT false,
     subscription_date TIMESTAMP WITH TIME ZONE,
     trading_amount TEXT,

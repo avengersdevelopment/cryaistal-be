@@ -1,9 +1,7 @@
 import { Wallet } from "ethers";
 
 export enum Chain {
-  ETHEREUM = "ethereum",
-  POLYGON = "polygon",
-  BASE = "base"
+  BASE = "base",
 }
 
 export interface UserWallet {
@@ -53,6 +51,7 @@ export interface ChainConfig {
   decimals: number;
   router: string;
   factory: string;
+  universal_router: string;
 }
 
 export interface TrustedTrader {
