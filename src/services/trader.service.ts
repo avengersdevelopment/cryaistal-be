@@ -5,6 +5,7 @@ import { createClient } from "@supabase/supabase-js";
 import { ethers } from "ethers";
 import { UniswapService } from "./uniswap.service";
 import { WalletService } from "./wallet.service";
+import { BirdEyeService } from "./birdeye.service";
 
 const supabase = createClient(config.supabase.url, config.supabase.key);
 
@@ -74,6 +75,7 @@ interface RequestQueue {
 export class TraderService {
   private uniswapService: UniswapService;
   private walletService: WalletService;
+  private birdEyeService: BirdEyeService;
   private isTracking: boolean = false;
   private lastProcessedNonces: Map<string, number> = new Map();
   private trustedTraderAddresses: Set<string> = new Set();
@@ -102,10 +104,12 @@ export class TraderService {
   private requestQueue: RequestQueue[] = [];
   private lastProcessedBlock: number = 0;
   private processingBlocks: boolean = false;
+  private cleanupFunctions: Array<() => void> = [];
 
   constructor() {
     this.uniswapService = new UniswapService();
     this.walletService = new WalletService();
+    this.birdEyeService = new BirdEyeService();
     
     this.txCache = new Map();
     this.receiptCache = new Map();
@@ -183,7 +187,6 @@ Reason: No active subscribers
 Time: ${new Date().toLocaleTimeString()}
 ===================`);
       
-      // Stop all monitoring
       this.stopMonitoring();
       return;
     }
@@ -197,193 +200,92 @@ Time: ${new Date().toLocaleTimeString()}
       return;
     }
 
-    // Remove existing listeners
-    this.provider.removeAllListeners();
-
-    // 1. Monitor ALL pending transactions untuk trusted traders
-    this.provider.on('pending', async (txHash) => {
-      try {
-        if (this.processedTxCache.has(txHash)) return;
-
-        const tx = await this.provider.getTransaction(txHash);
-        if (!tx || !this.trustedTraderAddresses.has(tx.from.toLowerCase())) return;
-
-        // Cek apakah transaksi ke Uniswap router
-        if (tx.to && (
-          tx.to.toLowerCase() === this.SWAP_ROUTER ||
-          tx.to.toLowerCase() === this.UNIVERSAL_ROUTER
-        )) {
-          console.log(`
-📡 PENDING TX DETECTED
-=====================
-Hash: ${txHash}
-From: ${tx.from}
-To: ${tx.to}
-Value: ${ethers.formatEther(tx.value)} ETH
-=====================`);
-          
-          await this.processTraderTransaction(tx);
+    // Setup BirdEye monitoring for each trader
+    for (const trader of traders) {
+      const cleanup = await this.birdEyeService.monitorWalletTransactions(
+        trader.address,
+        async (transaction) => {
+          // Handle new transaction
+          await this.handleBirdEyeTransaction(transaction, trader);
         }
-      } catch (error) {
-        if (error instanceof Error && error.message.includes('rate limit')) {
-          console.log('⏳ Rate limit on pending tx, will catch in block monitoring');
-        }
-      }
-    });
-
-    // 2. Monitor specific Uniswap events sebagai backup
-    const swapRouterFilter = {
-      address: this.SWAP_ROUTER,
-      topics: [
-        // Swap events dari SwapRouter
-        ethers.id("Swap(address,address,int256,int256,uint160,uint128,int24)")
-      ]
-    };
-
-    const universalRouterFilter = {
-      address: this.UNIVERSAL_ROUTER,
-      topics: [
-        // Universal Router events
-        ethers.id("ExactInputSingle(address,uint256,uint256,uint160)"),
-        ethers.id("ExactInput(bytes,uint256)")
-      ]
-    };
-
-    // Monitor SwapRouter events
-    this.provider.on(swapRouterFilter, async (log) => {
-      try {
-        if (this.processedTxCache.has(log.transactionHash)) return;
-
-        const tx = await this.provider.getTransaction(log.transactionHash);
-        if (!tx || !this.trustedTraderAddresses.has(tx.from.toLowerCase())) return;
-
-        console.log(`
-✨ SWAP EVENT DETECTED (SwapRouter)
-================================
-Hash: ${log.transactionHash}
-Block: ${log.blockNumber}
-Event: ${log.topics[0]}
-================================`);
-
-        await this.processTraderTransaction(tx);
-      } catch (error) {
-        if (error instanceof Error && error.message.includes('rate limit')) {
-          console.log('⏳ Rate limit on swap event, will catch in block monitoring');
-        }
-      }
-    });
-
-    // Monitor UniversalRouter events
-    this.provider.on(universalRouterFilter, async (log) => {
-      try {
-        if (this.processedTxCache.has(log.transactionHash)) return;
-
-        const tx = await this.provider.getTransaction(log.transactionHash);
-        if (!tx || !this.trustedTraderAddresses.has(tx.from.toLowerCase())) return;
-
-        console.log(`
-✨ SWAP EVENT DETECTED (UniversalRouter)
-=====================================
-Hash: ${log.transactionHash}
-Block: ${log.blockNumber}
-Event: ${log.topics[0]}
-=====================================`);
-
-        await this.processTraderTransaction(tx);
-    } catch (error) {
-        if (error instanceof Error && error.message.includes('rate limit')) {
-          console.log('⏳ Rate limit on swap event, will catch in block monitoring');
-        }
-      }
-    });
-
-    // 3. Block monitoring sebagai final safety net
-    let lastProcessedBlock = await this.provider.getBlockNumber();
-    
-    this.provider.on('block', async (blockNumber) => {
-      try {
-        // Proses block yang terlewat
-        while (lastProcessedBlock < blockNumber) {
-          lastProcessedBlock++;
-          
-          const block = await this.provider.getBlock(lastProcessedBlock, true);
-          if (!block || !block.transactions) continue;
-
-          console.log(`
-🔍 SCANNING BLOCK ${lastProcessedBlock}
-====================================
-Transactions: ${block.transactions.length}
-Timestamp: ${new Date(block.timestamp * 1000).toISOString()}
-====================================`);
-
-          // Proses setiap transaksi dalam block
-          for (const txHash of block.transactions) {
-            try {
-              if (this.processedTxCache.has(txHash)) continue;
-
-              const tx = await this.provider.getTransaction(txHash);
-              if (!tx || !this.trustedTraderAddresses.has(tx.from.toLowerCase())) continue;
-
-              // Cek apakah transaksi ke Uniswap router
-              if (tx.to && (
-                tx.to.toLowerCase() === this.SWAP_ROUTER ||
-                tx.to.toLowerCase() === this.UNIVERSAL_ROUTER
-              )) {
-                console.log(`
-🎯 FOUND TRUSTED TRADER TX IN BLOCK
-=================================
-Hash: ${txHash}
-From: ${tx.from}
-Block: ${lastProcessedBlock}
-=================================`);
-
-                await this.processTraderTransaction(tx);
-      }
-    } catch (error) {
-              if (error instanceof Error && error.message.includes('rate limit')) {
-                // Jika hit rate limit, tunggu dan coba lagi
-                await new Promise(resolve => setTimeout(resolve, 2000));
-                lastProcessedBlock--; // Proses ulang block ini
-                break;
-              }
-            }
-          }
-        }
-      } catch (error) {
-        console.error('Error in block monitoring:', error);
-        // Jika error, mundur satu block untuk dicoba lagi
-        lastProcessedBlock--;
-      }
-    });
+      );
+      this.cleanupFunctions.push(cleanup);
+    }
 
     this.monitoringState.isActive = true;
     this.monitoringState.subscriberCount = subscribers.length;
     this.monitoringState.lastCheck = Date.now();
 
     console.log(`
-🎯 TRIPLE MONITORING ACTIVE
-==========================
-1. Pending Transactions ✅
-2. Swap Events ✅
-3. Block Monitoring ✅
---------------------------
+🎯 BIRDEYE MONITORING ACTIVE
+===========================
 Subscribers: ${subscribers.length}
 Trusted Traders: ${this.trustedTraderAddresses.size}
-Starting Block: ${lastProcessedBlock}
-==========================`);
+Monitoring Type: BirdEye API
+===========================`);
+  }
 
-    // Start block monitoring
-    this.startBlockMonitoring();
+  private async handleBirdEyeTransaction(transaction: any, trader: TrustedTrader) {
+    try {
+      // Cek apakah transaksi adalah swap di Uniswap
+      if (
+        transaction.programId === this.SWAP_ROUTER ||
+        transaction.programId === this.UNIVERSAL_ROUTER
+      ) {
+        console.log(`
+🔍 NEW BIRDEYE TRANSACTION
+========================
+Trader: ${trader.name}
+Type: ${transaction.type}
+Signature: ${transaction.signature}
+Time: ${new Date(transaction.blockTime * 1000).toLocaleString()}
+========================`);
 
-    console.log(`
-🎯 MONITORING ACTIVE
-===================
-Rate Limit: ${RATE_LIMIT} req/sec
-Batch Size: ${BLOCK_BATCH_SIZE} blocks
-Interval: ${BLOCK_PROCESS_INTERVAL}ms
-Subscribers: ${this.monitoringState.subscriberCount}
-Traders: ${this.trustedTraderAddresses.size}
-===================`);
+        // Get active subscribers
+        const subscribers = await this.getActiveSubscribers();
+        if (!subscribers || subscribers.length === 0) {
+          console.log("❌ No active subscribers found");
+          return;
+        }
+
+        // Queue trades for each subscriber
+        for (const subscriber of subscribers) {
+          if (this.tradeQueue.length >= MAX_QUEUE_SIZE) {
+            console.log('⚠️ Trade queue full, skipping new trades');
+            continue;
+          }
+
+          const validation = await this.validateTradeSize(
+            subscriber.telegram_id,
+            subscriber.trading_amount,
+            Chain.BASE
+          );
+
+          if (!validation.valid) {
+            console.log(`❌ Trade skipped: ${validation.error}`);
+            continue;
+          }
+
+          // Add to queue with BirdEye transaction
+          this.tradeQueue.push({
+            userId: subscriber.telegram_id,
+            tx: transaction,
+            trader,
+            attempts: 0,
+            lastAttempt: 0
+          });
+
+          console.log(`✅ Trade queued for user ${subscriber.telegram_id}`);
+        }
+
+        // Process queue if needed
+        if (this.tradeQueue.length > 0 && !this.isProcessingQueue) {
+          this.processTradeQueue();
+        }
+      }
+    } catch (error) {
+      console.error('Error handling BirdEye transaction:', error);
+    }
   }
 
   private async processTraderTransaction(tx: ethers.TransactionResponse) {
@@ -397,8 +299,19 @@ Traders: ${this.trustedTraderAddresses.size}
 Hash: ${tx.hash}
 From: ${tx.from}
 To: ${tx.to}
+Data: ${tx.data.slice(0, 66)}...
 Data Length: ${tx.data.length}
+Value: ${ethers.formatEther(tx.value)} ETH
 =======================`);
+
+      // Verify this is a transaction to Uniswap router
+      const routerAddress = config.base.uniswap.router.toLowerCase();
+      const universalRouterAddress = config.base.uniswap.universal_router.toLowerCase();
+      
+      if (!tx.to || (tx.to.toLowerCase() !== routerAddress && tx.to.toLowerCase() !== universalRouterAddress)) {
+        console.log('❌ Not a Uniswap router transaction');
+        return;
+      }
 
       // Decode swap data
       const decodedSwap = await this.uniswapService.decodeSwapInput(tx.data);
@@ -408,14 +321,138 @@ Data Length: ${tx.data.length}
         return;
       }
 
+      // Validate decoded data
+      const WETH = "0x4200000000000000000000000000000000000006";
+      const NATIVE_ETH = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE";
+      const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+      
+      if (!ethers.isAddress(decodedSwap.tokenIn) || !ethers.isAddress(decodedSwap.tokenOut)) {
+        console.log('❌ Invalid token addresses in decoded data');
+        console.log(`Token In: ${decodedSwap.tokenIn}`);
+        console.log(`Token Out: ${decodedSwap.tokenOut}`);
+        return;
+      }
+
+      const tokenInLower = decodedSwap.tokenIn.toLowerCase();
+      // Check if token is WETH, ETH Native, or Zero Address (which means ETH)
+      if (tokenInLower !== WETH.toLowerCase() && 
+          tokenInLower !== NATIVE_ETH.toLowerCase() && 
+          tokenInLower !== ZERO_ADDRESS.toLowerCase()) {
+        console.log(`
+❌ Invalid Input Token
+===================
+Token In: ${decodedSwap.tokenIn}
+Expected: 
+- WETH: ${WETH}
+- ETH Native: ${NATIVE_ETH}
+- Zero Address (ETH): ${ZERO_ADDRESS}
+===================`);
+        return;
+      }
+
+      // Handle fee validation
+      const validFees = [100, 500, 3000, 10000];
+      let swapFee = decodedSwap.fee;
+      
+      const isUniversalRouter = tx.to?.toLowerCase() === universalRouterAddress.toLowerCase();
+      
+      console.log(`
+🔄 ROUTER CHECK
+=============
+Transaction To: ${tx.to}
+Universal Router: ${universalRouterAddress}
+Is Universal Router: ${isUniversalRouter}
+Original Fee: ${swapFee}
+=============`);
+      
+      // If fee is 0 and using Universal Router, set default fee
+      if (swapFee === 0 && isUniversalRouter) {
+        // Default to 0.3% fee for Universal Router
+        swapFee = 3000;
+        console.log(`
+ℹ️ Using default fee for Universal Router
+=======================================
+Original Fee: 0
+Default Fee: 0.3% (3000)
+=======================================`);
+      }
+
+      if (!validFees.includes(swapFee)) {
+        console.log(`
+❌ Invalid Fee
+============
+Fee: ${swapFee}
+Valid Fees: ${validFees.map(fee => fee/10000).join('%, ')}%
+Router: ${isUniversalRouter ? 'Universal Router' : 'SwapRouter'}
+Transaction To: ${tx.to}
+============`);
+        return;
+      }
+
       console.log(`
 ✅ DECODED SWAP DATA
 ==================
-Token In: ${decodedSwap.tokenIn}
+Token In: ${tokenInLower === ZERO_ADDRESS.toLowerCase() ? "ETH (Zero Address)" : 
+          tokenInLower === NATIVE_ETH.toLowerCase() ? "ETH (Native)" : "WETH"}
 Token Out: ${decodedSwap.tokenOut}
-Fee: ${decodedSwap.fee}
-Amount In: ${decodedSwap.amountIn.toString()} wei
+Fee: ${swapFee / 10000}%
+Amount In: ${ethers.formatEther(decodedSwap.amountIn)} ETH
+Router: ${isUniversalRouter ? 'Universal Router' : 'SwapRouter'}
 ==================`);
+
+      // Verify pool exists before proceeding
+      const factoryContract = new ethers.Contract(
+        config.base.uniswap.factory,
+        [
+          "function getPool(address tokenA, address tokenB, uint24 fee) external view returns (address pool)",
+        ],
+        this.provider
+      );
+
+      // Try different fee tiers
+      const feeTiers = [100, 500, 3000, 10000];
+      let pool = ethers.ZeroAddress;
+      
+      console.log(`
+🔍 SEARCHING FOR LIQUIDITY POOL
+============================
+Token In: ${WETH}
+Token Out: ${decodedSwap.tokenOut}
+Checking fee tiers: ${feeTiers.map(fee => fee/10000).join('%, ')}%
+============================`);
+
+      for (const fee of feeTiers) {
+        const foundPool = await factoryContract.getPool(
+          WETH,
+          decodedSwap.tokenOut,
+          fee
+        );
+
+        if (foundPool !== ethers.ZeroAddress) {
+          pool = foundPool;
+          console.log(`✅ Found pool with ${fee/10000}% fee: ${pool}`);
+          break;
+        }
+      }
+
+      if (pool === ethers.ZeroAddress) {
+        console.log(`❌ No liquidity pool found for token ${decodedSwap.tokenOut}`);
+        console.log('Trying to decode more transaction details...');
+        
+        // Log more details about the transaction
+        console.log(`
+📝 TRANSACTION DETAILS
+===================
+Input Data: ${tx.data}
+Gas Limit: ${tx.gasLimit}
+Gas Price: ${ethers.formatUnits(tx.gasPrice || 0, 'gwei')} gwei
+Nonce: ${tx.nonce}
+===================`);
+        
+        return;
+      }
+
+      console.log(`✅ Found liquidity pool: ${pool}`);
 
       // Cache the transaction
       this.txCache.set(tx.hash, { data: tx, timestamp: Date.now() });
@@ -1618,20 +1655,15 @@ Tx Count: ${block.transactions.length}
 
   private stopMonitoring() {
     try {
-      // Stop block monitoring
-      this.processingBlocks = false;
-      
-      // Remove all event listeners
-      this.provider.removeAllListeners();
+      // Stop all BirdEye monitoring
+      this.cleanupFunctions.forEach(cleanup => cleanup());
+      this.cleanupFunctions = [];
       
       // Reset state
       this.monitoringState.isActive = false;
       this.monitoringState.subscriberCount = 0;
-      this.lastProcessedBlock = 0;
       
       // Clear all queues
-      this.requestQueue = [];
-      this.pendingTxQueue = [];
       this.tradeQueue = [];
       this.txQueue = [];
       
@@ -1645,9 +1677,7 @@ Tx Count: ${block.transactions.length}
 ==============================
 Time: ${new Date().toLocaleTimeString()}
 Status:
-- WebSocket: Disconnected
-- Block Monitoring: Stopped
-- Event Listeners: Removed
+- BirdEye Monitoring: Stopped
 - Queues: Cleared
 - Caches: Cleared
 ==============================`);

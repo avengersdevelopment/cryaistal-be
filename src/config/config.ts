@@ -5,23 +5,30 @@ import { resolve } from "path";
 dotenv.config({ path: resolve(__dirname, "../../.env") });
 
 export const config = {
-  botToken: process.env.BOT_TOKEN || "",
+  telegram: {
+    token: process.env.TELEGRAM_BOT_TOKEN || "",
+  },
   supabase: {
     url: process.env.SUPABASE_URL || "",
-    key: process.env.SUPABASE_KEY || ""
+    key: process.env.SUPABASE_KEY || "",
   },
   base: {
-    rpc_url: process.env.BASE_RPC_URL || "",
-    chainId: 8453,
+    rpc: {
+      http: process.env.BASE_RPC_HTTP || "",
+      ws: process.env.BASE_RPC_WS || "",
+    },
     uniswap: {
-      router: process.env.UNISWAP_V3_ROUTER || "",
-      factory: process.env.UNISWAP_V3_FACTORY || "",
-      universal_router: process.env.UNIVERSAL_ROUTER || "",
-      permit2: process.env.PERMIT2 || ""
-    }
+      router: process.env.UNISWAP_ROUTER || "",
+      universal_router: process.env.UNISWAP_UNIVERSAL_ROUTER || "",
+      factory: process.env.UNISWAP_FACTORY || "",
+      quoter: process.env.UNISWAP_QUOTER || "",
+    },
   },
   quicknode: {
     rpc_url: process.env.QUICKNODE_RPC_URL || "",
     ws_url: process.env.QUICKNODE_WS_URL || ""
+  },
+  birdeye: {
+    api_key: process.env.BIRDEYE_API_KEY || "",
   }
 };
