@@ -23,11 +23,12 @@ const MAX_RETRIES = 3;
 const MAX_TX_PER_BLOCK = 50;
 const MIN_TRADE_AMOUNT = "0.0001";
 const MAX_TRADE_AMOUNT = "1";
-const MIN_ETH_FOR_GAS = "0.0003"; // Turunkan gas buffer
-const MIN_BALANCE_BUFFER = "0.0002"; // Turunkan safety buffer
+const MIN_ETH_FOR_GAS = "0.0000005"; // Lower gas buffer
+const MIN_BALANCE_BUFFER = "0.0000005"; // Lower safety buffer
 const MAX_PENDING_TRADES = 5;
 const BATCH_DELAY = 200;
 const MAX_QUEUE_SIZE = 50; // Batasi ukuran queue
+const UNIVERSAL_ROUTER_V2 = "0x3fC91A3afd70395Cd496C647d5a6CC9D4B2b7FAD";
 
 interface CacheEntry<T> {
   data: T;
@@ -202,61 +203,15 @@ Time: ${new Date().toLocaleTimeString()}
     // Remove existing listeners
     this.provider.removeAllListeners();
 
-    // 1. Monitor ALL pending transactions untuk trusted traders
-    this.provider.on("pending", async (txHash) => {
-      try {
-        if (this.processedTxCache.has(txHash)) return;
-
-        const tx = await this.provider.getTransaction(txHash);
-        if (!tx || !this.trustedTraderAddresses.has(tx.from.toLowerCase()))
-          return;
-
-        // Cek apakah transaksi ke Uniswap router
-        if (
-          tx.to &&
-          (tx.to.toLowerCase() === this.SWAP_ROUTER ||
-            tx.to.toLowerCase() === this.UNIVERSAL_ROUTER)
-        ) {
-          console.log(`
-📡 PENDING TX DETECTED
-=====================
-Hash: ${txHash}
-From: ${tx.from}
-To: ${tx.to}
-Value: ${ethers.formatEther(tx.value)} ETH
-=====================`);
-
-          await this.processTraderTransaction(tx);
-        }
-      } catch (error) {
-        if (error instanceof Error && error.message.includes("rate limit")) {
-          console.log(
-            "⏳ Rate limit on pending tx, will catch in block monitoring"
-          );
-        }
-      }
-    });
-
-    // 2. Monitor specific Uniswap events sebagai backup
-    const swapRouterFilter = {
-      address: this.SWAP_ROUTER,
+    // Monitor Uniswap V3 Pool Swap events
+    const poolSwapFilter = {
+      address: "0xd0b53D9277642d899DF5C87A3966A349A798F224", // WETH/USDC Pool
       topics: [
-        // Swap events dari SwapRouter
         ethers.id("Swap(address,address,int256,int256,uint160,uint128,int24)"),
       ],
     };
 
-    const universalRouterFilter = {
-      address: this.UNIVERSAL_ROUTER,
-      topics: [
-        // Universal Router events
-        ethers.id("ExactInputSingle(address,uint256,uint256,uint160)"),
-        ethers.id("ExactInput(bytes,uint256)"),
-      ],
-    };
-
-    // Monitor SwapRouter events
-    this.provider.on(swapRouterFilter, async (log) => {
+    this.provider.on(poolSwapFilter, async (log) => {
       try {
         if (this.processedTxCache.has(log.transactionHash)) return;
 
@@ -264,13 +219,23 @@ Value: ${ethers.formatEther(tx.value)} ETH
         if (!tx || !this.trustedTraderAddresses.has(tx.from.toLowerCase()))
           return;
 
+        // Decode the swap event
+        const decodedData = ethers.AbiCoder.defaultAbiCoder().decode(
+          ["int256", "int256", "uint160", "uint128", "int24"],
+          ethers.dataSlice(log.data, 0)
+        );
+
+        const [amount0, amount1, sqrtPriceX96, liquidity, tick] = decodedData;
+
         console.log(`
-✨ SWAP EVENT DETECTED (SwapRouter)
-================================
+🔄 POOL SWAP DETECTED
+====================
 Hash: ${log.transactionHash}
-Block: ${log.blockNumber}
-Event: ${log.topics[0]}
-================================`);
+Trader: ${tx.from}
+Amount0: ${amount0.toString()}
+Amount1: ${amount1.toString()}
+Tick: ${tick.toString()}
+====================`);
 
         await this.processTraderTransaction(tx);
       } catch (error) {
@@ -279,93 +244,6 @@ Event: ${log.topics[0]}
             "⏳ Rate limit on swap event, will catch in block monitoring"
           );
         }
-      }
-    });
-
-    // Monitor UniversalRouter events
-    this.provider.on(universalRouterFilter, async (log) => {
-      try {
-        if (this.processedTxCache.has(log.transactionHash)) return;
-
-        const tx = await this.provider.getTransaction(log.transactionHash);
-        if (!tx || !this.trustedTraderAddresses.has(tx.from.toLowerCase()))
-          return;
-
-        console.log(`
-✨ SWAP EVENT DETECTED (UniversalRouter)
-=====================================
-Hash: ${log.transactionHash}
-Block: ${log.blockNumber}
-Event: ${log.topics[0]}
-=====================================`);
-
-        await this.processTraderTransaction(tx);
-      } catch (error) {
-        if (error instanceof Error && error.message.includes("rate limit")) {
-          console.log(
-            "⏳ Rate limit on swap event, will catch in block monitoring"
-          );
-        }
-      }
-    });
-
-    // 3. Block monitoring sebagai final safety net
-    let lastProcessedBlock = await this.provider.getBlockNumber();
-
-    this.provider.on("block", async (blockNumber) => {
-      try {
-        // Proses block yang terlewat
-        while (lastProcessedBlock < blockNumber) {
-          lastProcessedBlock++;
-
-          const block = await this.provider.getBlock(lastProcessedBlock, true);
-          if (!block || !block.transactions) continue;
-
-          // Proses setiap transaksi dalam block
-          for (const txHash of block.transactions) {
-            try {
-              if (this.processedTxCache.has(txHash)) continue;
-
-              const tx = await this.provider.getTransaction(txHash);
-              if (
-                !tx ||
-                !this.trustedTraderAddresses.has(tx.from.toLowerCase())
-              )
-                continue;
-
-              // Cek apakah transaksi ke Uniswap router
-              if (
-                tx.to &&
-                (tx.to.toLowerCase() === this.SWAP_ROUTER ||
-                  tx.to.toLowerCase() === this.UNIVERSAL_ROUTER)
-              ) {
-                console.log(`
-🎯 FOUND TRUSTED TRADER TX IN BLOCK
-=================================
-Hash: ${txHash}
-From: ${tx.from}
-Block: ${lastProcessedBlock}
-=================================`);
-
-                await this.processTraderTransaction(tx);
-              }
-            } catch (error) {
-              if (
-                error instanceof Error &&
-                error.message.includes("rate limit")
-              ) {
-                // Jika hit rate limit, tunggu dan coba lagi
-                await new Promise((resolve) => setTimeout(resolve, 2000));
-                lastProcessedBlock--; // Proses ulang block ini
-                break;
-              }
-            }
-          }
-        }
-      } catch (error) {
-        console.error("Error in block monitoring:", error);
-        // Jika error, mundur satu block untuk dicoba lagi
-        lastProcessedBlock--;
       }
     });
 
@@ -374,29 +252,16 @@ Block: ${lastProcessedBlock}
     this.monitoringState.lastCheck = Date.now();
 
     console.log(`
-🎯 TRIPLE MONITORING ACTIVE
-==========================
-1. Pending Transactions ✅
-2. Swap Events ✅
-3. Block Monitoring ✅
---------------------------
+🎯 POOL MONITORING ACTIVE
+========================
+Pool: WETH/USDC
+Address: 0xd0b53D9277642d899DF5C87A3966A349A798F224
 Subscribers: ${subscribers.length}
 Trusted Traders: ${this.trustedTraderAddresses.size}
-Starting Block: ${lastProcessedBlock}
-==========================`);
+========================`);
 
-    // Start block monitoring
+    // Keep block monitoring as backup
     this.startBlockMonitoring();
-
-    console.log(`
-🎯 MONITORING ACTIVE
-===================
-Rate Limit: ${RATE_LIMIT} req/sec
-Batch Size: ${BLOCK_BATCH_SIZE} blocks
-Interval: ${BLOCK_PROCESS_INTERVAL}ms
-Subscribers: ${this.monitoringState.subscriberCount}
-Traders: ${this.trustedTraderAddresses.size}
-===================`);
   }
 
   private async processTraderTransaction(tx: ethers.TransactionResponse) {
@@ -463,33 +328,69 @@ Amount In: ${decodedSwap.amountIn.toString()} wei
 🔄 COPYING TRADE FOR SUBSCRIBER
 =============================
 User ID: ${subscriber.telegram_id}
-Amount: ${subscriber.trading_amount} ETH
+Max Amount: ${subscriber.trading_amount} ETH
 =============================`);
 
-      // Validate trade size and balance first
-      const validation = await this.validateTradeSize(
-        subscriber.telegram_id,
-        subscriber.trading_amount,
-        Chain.BASE
-      );
-
-      if (!validation.valid) {
-        console.log(`❌ Trade validation failed: ${validation.error}`);
-        return;
-      }
-
-      // Get user's wallet
+      // Get user's wallet and balance first
       const wallet = await this.walletService.getWallet(
         subscriber.telegram_id,
         Chain.BASE
       );
 
+      if (!wallet.provider) {
+        throw new Error("Wallet provider not initialized");
+      }
+
+      const balance = await wallet.provider.getBalance(wallet.address);
+      const balanceEth = ethers.formatEther(balance);
+
+      // Get original transaction value
+      const originalAmountWei = decodedSwap.amountIn;
+      const originalAmountEth = ethers.formatEther(originalAmountWei);
+
+      // Calculate proportional trade amount (use the same proportion as original trade)
+      const maxTradeAmountEth = parseFloat(subscriber.trading_amount);
+      const tradeAmountEth = Math.min(
+        parseFloat(originalAmountEth),
+        maxTradeAmountEth
+      ).toFixed(8);
+
+      // Calculate required amounts
+      const gasBufferEth = MIN_ETH_FOR_GAS;
+      const totalRequiredEth = (
+        parseFloat(tradeAmountEth) + parseFloat(gasBufferEth)
+      ).toFixed(8);
+
+      console.log(`
+💰 BALANCE CHECK
+==============
+Current Balance: ${balanceEth} ETH
+Original Trade: ${originalAmountEth} ETH
+Our Trade Amount: ${tradeAmountEth} ETH
+Gas Buffer: ${gasBufferEth} ETH
+Total Required: ${totalRequiredEth} ETH
+==============`);
+
+      if (parseFloat(balanceEth) < parseFloat(totalRequiredEth)) {
+        console.log(`❌ Insufficient balance for trade and gas`);
+        return;
+      }
+
       // Get latest gas price
       const feeData = await this.provider.getFeeData();
       const gasPrice = feeData.gasPrice || undefined;
 
-      // Use subscriber's amount directly without scaling
-      const amountIn = ethers.parseEther(subscriber.trading_amount);
+      // Define common token addresses
+      const WETH = "0x4200000000000000000000000000000000000006";
+      const USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+
+      // Get token addresses from decoded swap
+      const tokenIn =
+        decodedSwap.tokenIn === ethers.ZeroAddress ? WETH : decodedSwap.tokenIn;
+      const tokenOut =
+        decodedSwap.tokenOut === ethers.ZeroAddress
+          ? USDC
+          : decodedSwap.tokenOut;
 
       // Verify pool exists
       const factoryContract = new ethers.Contract(
@@ -500,39 +401,50 @@ Amount: ${subscriber.trading_amount} ETH
         this.provider
       );
 
-      const WETH = "0x4200000000000000000000000000000000000006";
-      const pool = await factoryContract.getPool(
-        WETH,
-        decodedSwap.tokenOut,
-        decodedSwap.fee
-      );
+      // Try different fee tiers
+      const feeTiers = [100, 500, 3000, 10000];
+      let pool = ethers.ZeroAddress;
+      let selectedFee = 500; // Default fee
+
+      for (const fee of feeTiers) {
+        const poolAddress = await factoryContract.getPool(
+          tokenIn,
+          tokenOut,
+          fee
+        );
+        if (poolAddress !== ethers.ZeroAddress) {
+          pool = poolAddress;
+          selectedFee = fee;
+          break;
+        }
+      }
 
       if (pool === ethers.ZeroAddress) {
         throw new Error(
-          `No liquidity pool found for token ${decodedSwap.tokenOut}`
+          `No liquidity pool found for ${tokenIn} -> ${tokenOut}`
         );
       }
 
       console.log(`
 💰 TRADE PARAMETERS
 =================
-Token In: ${decodedSwap.tokenIn === WETH ? "ETH/WETH" : decodedSwap.tokenIn}
-Token Out: ${decodedSwap.tokenOut}
+Token In: ${tokenIn === WETH ? "ETH/WETH" : tokenIn}
+Token Out: ${tokenOut === USDC ? "USDC" : tokenOut}
 Pool Address: ${pool}
-Amount: ${subscriber.trading_amount} ETH
-Fee: ${decodedSwap.fee / 10000}%
+Amount: ${tradeAmountEth} ETH
+Fee: ${selectedFee / 10000}%
 Gas Price: ${ethers.formatUnits(gasPrice || 0, "gwei")} gwei
 =================`);
 
-      // Execute the copy trade
+      // Execute the copy trade with scaled amount
       const result = await this.uniswapService.swapExactInputSingle(
         wallet,
         Chain.BASE,
         {
-          tokenIn: decodedSwap.tokenIn,
-          tokenOut: decodedSwap.tokenOut,
-          fee: decodedSwap.fee,
-          amountIn: amountIn.toString(),
+          tokenIn,
+          tokenOut,
+          fee: selectedFee,
+          amountIn: ethers.parseEther(tradeAmountEth).toString(),
           slippage: 1.0,
           gasPrice,
         }
@@ -544,7 +456,7 @@ Gas Price: ${ethers.formatUnits(gasPrice || 0, "gwei")} gwei
 ======================
 User: ${subscriber.telegram_id}
 Hash: ${result.txHash}
-Amount In: ${subscriber.trading_amount} ETH
+Amount In: ${tradeAmountEth} ETH
 Amount Out: ${ethers.formatUnits(result.amountOut || 0, 6)} USDC
 Gas Used: ${result.gasUsed}
 ======================`);
