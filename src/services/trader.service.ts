@@ -392,50 +392,6 @@ Total Required: ${totalRequiredEth} ETH
           ? USDC
           : decodedSwap.tokenOut;
 
-      // Verify pool exists
-      const factoryContract = new ethers.Contract(
-        config.base.uniswap.factory,
-        [
-          "function getPool(address tokenA, address tokenB, uint24 fee) external view returns (address pool)",
-        ],
-        this.provider
-      );
-
-      // Try different fee tiers
-      const feeTiers = [100, 500, 3000, 10000];
-      let pool = ethers.ZeroAddress;
-      let selectedFee = 500; // Default fee
-
-      for (const fee of feeTiers) {
-        const poolAddress = await factoryContract.getPool(
-          tokenIn,
-          tokenOut,
-          fee
-        );
-        if (poolAddress !== ethers.ZeroAddress) {
-          pool = poolAddress;
-          selectedFee = fee;
-          break;
-        }
-      }
-
-      if (pool === ethers.ZeroAddress) {
-        throw new Error(
-          `No liquidity pool found for ${tokenIn} -> ${tokenOut}`
-        );
-      }
-
-      console.log(`
-💰 TRADE PARAMETERS
-=================
-Token In: ${tokenIn === WETH ? "ETH/WETH" : tokenIn}
-Token Out: ${tokenOut === USDC ? "USDC" : tokenOut}
-Pool Address: ${pool}
-Amount: ${tradeAmountEth} ETH
-Fee: ${selectedFee / 10000}%
-Gas Price: ${ethers.formatUnits(gasPrice || 0, "gwei")} gwei
-=================`);
-
       // Execute the copy trade with scaled amount
       const result = await this.uniswapService.swapExactInputSingle(
         wallet,
@@ -443,7 +399,7 @@ Gas Price: ${ethers.formatUnits(gasPrice || 0, "gwei")} gwei
         {
           tokenIn,
           tokenOut,
-          fee: selectedFee,
+          fee: decodedSwap.fee || 100, // Use decoded fee or default to 0.01%
           amountIn: ethers.parseEther(tradeAmountEth).toString(),
           slippage: 1.0,
           gasPrice,
@@ -457,7 +413,6 @@ Gas Price: ${ethers.formatUnits(gasPrice || 0, "gwei")} gwei
 User: ${subscriber.telegram_id}
 Hash: ${result.txHash}
 Amount In: ${tradeAmountEth} ETH
-Amount Out: ${ethers.formatUnits(result.amountOut || 0, 6)} USDC
 Gas Used: ${result.gasUsed}
 ======================`);
       } else {

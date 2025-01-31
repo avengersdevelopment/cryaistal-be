@@ -25,10 +25,10 @@ const UNISWAP_V3_ABI = [
   "event Swap(address indexed sender, address indexed recipient, int256 amount0, int256 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick)",
 ];
 
-// Universal Router ABI
+// Universal Router ABI for swaps
 const UNIVERSAL_ROUTER_ABI = [
-  "function execute(bytes commands, bytes[] inputs, uint256 deadline) payable external",
-  "function execute(bytes commands, bytes[] inputs) payable external"
+  "function execute(bytes commands, bytes[] inputs, uint256 deadline) payable returns ()",
+  "function WETH9() external view returns (address)",
 ];
 
 // ERC20 ABI for token interactions
@@ -37,6 +37,11 @@ const ERC20_ABI = [
   "function allowance(address owner, address spender) external view returns (uint256)",
   "function balanceOf(address account) external view returns (uint256)",
   "function decimals() external view returns (uint8)",
+];
+
+// QuoterV2 ABI
+const QUOTER_V2_ABI = [
+  "function quoteExactInputSingle((address tokenIn, address tokenOut, uint264 amountIn, uint24 fee, uint160 sqrtPriceLimitX96) params) external returns (uint256 amountOut, uint160 sqrtPriceX96After, uint32 initializedTicksCrossed, uint256 gasEstimate)",
 ];
 
 interface SwapParams {
@@ -78,11 +83,15 @@ export class UniswapService {
   private lastRequestTime: number = 0;
   private readonly MIN_REQUEST_INTERVAL = 100; // 100ms between requests
   private pendingTransactions: Map<string, number> = new Map(); // txHash -> retry count
+  private readonly UNIVERSAL_ROUTER =
+    "0x3fC91A3afd70395Cd496C647d5a6CC9D4B2b7FAD";
+  private readonly QUOTER_V2 = "0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a";
+  private readonly WETH = "0x4200000000000000000000000000000000000006";
 
   constructor() {
     this.provider = new JsonRpcProvider(config.base.rpc_url, {
       chainId: config.base.chainId,
-      name: 'base'
+      name: "base",
     });
     this.monitorPendingTransactions();
   }
@@ -192,194 +201,124 @@ export class UniswapService {
   async swapExactInputSingle(
     wallet: ethers.Wallet,
     chain: Chain,
-    params: SwapParams
-  ): Promise<SwapResult> {
+    params: {
+      tokenIn: string;
+      tokenOut: string;
+      fee: number;
+      amountIn: string;
+      slippage: number;
+      gasPrice?: bigint;
+    }
+  ) {
     try {
-      if (!wallet.provider) {
-        throw new Error("Wallet provider not connected");
-      }
-
-      // Check ETH balance first
-      const balance = await wallet.provider.getBalance(wallet.address);
-      const amountInWei = BigInt(params.amountIn);
-      const minRequiredWei = amountInWei + ethers.parseEther("0.0002"); // Turunkan gas buffer ke 0.0002
-
       console.log(`
-💰 DETAILED BALANCE CHECK
-=======================
-Current Balance: ${ethers.formatEther(balance)} ETH
-Swap Amount: ${ethers.formatEther(amountInWei)} ETH
-Required (with buffer): ${ethers.formatEther(minRequiredWei)} ETH
-Available for Gas: ${ethers.formatEther(balance - amountInWei)} ETH
-=======================`);
+💭 Getting quote for swap...
+Token In: ${params.tokenIn === this.WETH ? "ETH/WETH" : params.tokenIn}
+Token Out: ${params.tokenOut}
+Fee: ${params.fee / 10000}%`);
 
-      if (balance < minRequiredWei) {
-        throw new Error(`Insufficient balance. You need at least ${ethers.formatEther(minRequiredWei)} ETH (including gas buffer)`);
-      }
+      const isEthIn = params.tokenIn.toLowerCase() === this.WETH.toLowerCase();
 
-      // Get router contract with optimized ABI
-      const routerContract = new ethers.Contract(
-        config.base.uniswap.router,
-        [
-          'function exactInputSingle((address tokenIn, address tokenOut, uint24 fee, address recipient, uint256 deadline, uint256 amountIn, uint256 amountOutMinimum, uint160 sqrtPriceLimitX96)) external payable returns (uint256 amountOut)',
-          'function quoteExactInputSingle(address tokenIn, address tokenOut, uint24 fee, uint256 amountIn, uint160 sqrtPriceLimitX96) external view returns (uint256 amountOut, uint160 sqrtPriceX96After, uint32 initializedTicksCrossed, uint256 gasEstimate)'
-        ],
+      // Get quote first to calculate minimum output
+      const quoter = new ethers.Contract(this.QUOTER_V2, QUOTER_V2_ABI, wallet);
+      const [quoteAmount] = await quoter.quoteExactInputSingle.staticCall({
+        tokenIn: params.tokenIn,
+        tokenOut: params.tokenOut,
+        amountIn: params.amountIn,
+        fee: params.fee,
+        sqrtPriceLimitX96: 0,
+      });
+
+      // Calculate minimum output with slippage
+      const minOut =
+        quoteAmount -
+        (quoteAmount * BigInt(Math.floor(params.slippage * 100))) /
+          BigInt(10000);
+
+      // Create router contract
+      const router = new ethers.Contract(
+        this.UNIVERSAL_ROUTER,
+        UNIVERSAL_ROUTER_ABI,
         wallet
       );
 
-      // Get token details
-      const WETH = "0x4200000000000000000000000000000000000006";
-      const USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
-      const tokenIn = params.tokenIn === ethers.ZeroAddress ? WETH : params.tokenIn;
-      const tokenOut = params.tokenOut || USDC; // Default to USDC if not specified
-      const fee = params.fee || 3000; // Default to 0.3% if not specified
+      // Command types
+      const COMMAND_TYPE = {
+        V3_SWAP_EXACT_IN: "00",
+        WRAP_ETH: "0b",
+        UNWRAP_WETH: "0c",
+      };
 
-      // Validate token addresses
-      if (!ethers.isAddress(tokenIn) || !ethers.isAddress(tokenOut)) {
-        throw new Error('Invalid token address');
-      }
-
-      // Validate fee
-      const validFees = [100, 500, 3000, 10000]; // 0.01%, 0.05%, 0.3%, 1%
-      if (!validFees.includes(fee)) {
-        throw new Error(`Invalid fee. Must be one of: ${validFees.map(f => f/10000)}%`);
-      }
-
-      // Get quote with more details
-      console.log(`\n💭 Getting quote for swap...`);
-      console.log(`Token In: ${tokenIn === WETH ? "ETH/WETH" : tokenIn}`);
-      console.log(`Token Out: ${tokenOut}`);
-      console.log(`Fee: ${fee / 10000}%`);
-      
-      // Get quote amount
-      const [quoteAmount, , , estimatedGas] = await routerContract.quoteExactInputSingle.staticCall(
-        tokenIn,
-        tokenOut,
-        fee,
-        amountInWei,
-        0
+      // Encode V3 swap parameters
+      const swapParams = ethers.AbiCoder.defaultAbiCoder().encode(
+        [
+          "address",
+          "address",
+          "uint24",
+          "address",
+          "uint256",
+          "uint256",
+          "uint160",
+        ],
+        [
+          params.tokenIn,
+          params.tokenOut,
+          params.fee,
+          wallet.address,
+          params.amountIn,
+          minOut,
+          0, // sqrtPriceLimitX96
+        ]
       );
 
-      // Increase slippage to 2% for small trades
-      const slippagePercent = amountInWei < ethers.parseEther("0.001") ? BigInt(2) : BigInt(1);
-      const minAmountOut = quoteAmount - (quoteAmount * slippagePercent / BigInt(100));
-
-      // Try to get token decimals for better formatting
-      let outDecimals = 18; // default to 18
-      try {
-        const tokenContract = new ethers.Contract(
-          tokenOut,
-          ['function decimals() view returns (uint8)'],
-          wallet
-        );
-        outDecimals = await tokenContract.decimals();
-      } catch (error) {
-        console.log('Could not get token decimals, using default 18');
+      // Prepare commands and inputs
+      let commands = COMMAND_TYPE.V3_SWAP_EXACT_IN;
+      if (isEthIn) {
+        commands = COMMAND_TYPE.WRAP_ETH + commands;
       }
 
-      // Get latest gas price with optimization
-      const feeData = await wallet.provider.getFeeData();
-      const baseGasPrice = feeData.gasPrice || BigInt(0);
-      
-      // Optimize gas price - use 90% of current gas price for small trades
-      const gasPrice = amountInWei < ethers.parseEther("0.001") 
-        ? (baseGasPrice * BigInt(90) / BigInt(100))
-        : baseGasPrice;
+      const inputs = [swapParams];
+      const deadline = Math.floor(Date.now() / 1000) + 60 * 20; // 20 minutes
 
-      // Use lower gas limit for small trades
-      const gasLimit = amountInWei < ethers.parseEther("0.001")
-        ? estimatedGas + (estimatedGas * BigInt(30) / BigInt(100))  // 30% buffer for small trades
-        : estimatedGas + (estimatedGas * BigInt(50) / BigInt(100)); // 50% buffer for larger trades
+      // Prepare transaction
+      const txData = {
+        value: isEthIn ? params.amountIn : "0",
+        gasPrice: params.gasPrice,
+      };
 
       console.log(`
-⛽ OPTIMIZED GAS SETTINGS
-=======================
-Base Gas Price: ${ethers.formatUnits(baseGasPrice, 'gwei')} gwei
-Optimized Gas Price: ${ethers.formatUnits(gasPrice, 'gwei')} gwei
-Estimated Gas: ${estimatedGas}
-Gas Limit: ${gasLimit}
-Total Gas Cost: ${ethers.formatEther(gasLimit * gasPrice)} ETH
-=======================`);
+🔄 Executing swap...
+Commands: ${commands}
+Value: ${ethers.formatEther(txData.value)} ETH
+Gas Price: ${
+        txData.gasPrice ? ethers.formatUnits(txData.gasPrice, "gwei") : "auto"
+      } gwei
+Min Output: ${ethers.formatUnits(minOut, 6)} USDC`);
 
-      // Execute swap with optimized parameters
-      console.log(`\n🔄 Executing swap with optimized parameters...`);
-      
-      const tx = await routerContract.exactInputSingle(
-        {
-          tokenIn,
-          tokenOut,
-          fee,
-          recipient: wallet.address,
-          deadline: Math.floor(Date.now() / 1000) + 60 * 20,
-          amountIn: amountInWei,
-          amountOutMinimum: minAmountOut,
-          sqrtPriceLimitX96: 0
-        },
-        {
-          value: params.tokenIn === ethers.ZeroAddress ? amountInWei : 0,
-          gasLimit,
-          gasPrice,
-          maxFeePerGas: undefined, // Disable EIP-1559 for more predictable gas costs
-          maxPriorityFeePerGas: undefined
-        }
+      // Execute swap
+      const tx = await router.execute(
+        "0x" + commands,
+        inputs,
+        deadline,
+        txData
       );
 
-      console.log(`\n📝 Transaction sent: ${tx.hash}`);
-
-      // Wait for confirmation with timeout
-      const receipt = await Promise.race([
-        tx.wait(),
-        new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('Transaction confirmation timeout')), 60000)
-        )
-      ]) as ethers.TransactionReceipt;
-
-      if (!receipt || !receipt.status) {
-        throw new Error('Transaction failed');
-      }
-
-      console.log(`
-✅ SWAP SUCCESSFUL
-================
-Hash: ${receipt.hash}
-Block: ${receipt.blockNumber}
-Gas Used: ${receipt.gasUsed}
-Effective Gas Price: ${ethers.formatUnits(receipt.gasPrice || 0, 'gwei')} gwei
-Total Cost: ${ethers.formatEther(BigInt(receipt.gasPrice || 0) * BigInt(receipt.gasUsed))} ETH
-================`);
+      const receipt = await tx.wait();
 
       return {
         success: true,
         txHash: receipt.hash,
-        amountIn: amountInWei.toString(),
-        amountOut: quoteAmount.toString(),
-        gasUsed: receipt.gasUsed.toString()
+        gasUsed: receipt.gasUsed?.toString(),
+        amountOut: minOut.toString(),
       };
-
     } catch (error: any) {
-      console.error('Swap failed:', error);
-      
-      let errorMessage = 'Unknown error';
-      
-      if (error.code === 'CALL_EXCEPTION') {
-        if (error.info?.error?.message) {
-          errorMessage = `Transaction would fail: ${error.info.error.message}`;
-        } else if (error.reason) {
-          errorMessage = `Transaction would fail: ${error.reason}`;
-        } else {
-          errorMessage = 'Transaction would fail: Please check pool liquidity and gas settings';
-        }
-      } else if (error.code === 'INSUFFICIENT_FUNDS') {
-        errorMessage = 'Insufficient ETH for transaction';
-      } else if (error.code === 'UNPREDICTABLE_GAS_LIMIT') {
-        errorMessage = 'Could not estimate gas: The swap might fail';
-      } else if (error.message) {
-        errorMessage = error.message;
-      }
-
+      console.log("Swap failed:", error);
       return {
         success: false,
-        error: errorMessage
+        error:
+          error?.shortMessage ||
+          error?.message ||
+          "Transaction would fail: execution reverted",
       };
     }
   }
@@ -457,10 +396,12 @@ Length: ${data.length}
 =========================`);
 
       // Check if this is Universal Router or SwapRouter
-      const isUniversalRouter = data.startsWith('0x3593564c'); // execute function selector
-      
-      console.log(`Router Type: ${isUniversalRouter ? 'Universal Router' : 'Swap Router'}`);
-      
+      const isUniversalRouter = data.startsWith("0x3593564c"); // execute function selector
+
+      console.log(
+        `Router Type: ${isUniversalRouter ? "Universal Router" : "Swap Router"}`
+      );
+
       if (isUniversalRouter) {
         return this.decodeUniversalRouterInput(data);
       }
@@ -470,17 +411,17 @@ Length: ${data.length}
       const parsed = iface.parseTransaction({ data });
 
       if (!parsed) {
-        console.log('❌ Could not parse transaction data');
+        console.log("❌ Could not parse transaction data");
         return null;
       }
 
       console.log(`Function Name: ${parsed.name}`);
 
       // Handle different function types
-      if (parsed.name === 'exactInputSingle') {
+      if (parsed.name === "exactInputSingle") {
         const params = parsed.args[0];
         if (!params) {
-          console.log('❌ No parameters found in transaction');
+          console.log("❌ No parameters found in transaction");
           return null;
         }
 
@@ -499,14 +440,13 @@ Amount In: ${ethers.formatEther(params.amountIn)} ETH
           fee: params.fee,
           amountIn: params.amountIn,
           amountOutMinimum: params.amountOutMinimum,
-          recipient: params.recipient
+          recipient: params.recipient,
         };
-      } 
-      else if (parsed.name === 'exactInput') {
+      } else if (parsed.name === "exactInput") {
         // Handle multi-hop swaps
         const params = parsed.args[0];
         if (!params || !params.path) {
-          console.log('❌ No path found in multi-hop swap');
+          console.log("❌ No path found in multi-hop swap");
           return null;
         }
 
@@ -514,18 +454,25 @@ Amount In: ${ethers.formatEther(params.amountIn)} ETH
           // Decode path for multi-hop
           const path = params.path;
           const pathData = ethers.getBytes(path);
-          
+
           console.log(`
 📝 EXACT INPUT (MULTI-HOP) PATH
 ============================
 Path Data: ${ethers.hexlify(pathData)}
 Length: ${pathData.length}
 ============================`);
-          
+
           // Get first and last token from path
-          const tokenIn = ethers.getAddress(ethers.hexlify(pathData.slice(0, 20)));
-          const fee = parseInt(ethers.hexlify(pathData.slice(20, 23)).slice(2), 16);
-          const tokenOut = ethers.getAddress(ethers.hexlify(pathData.slice(-20)));
+          const tokenIn = ethers.getAddress(
+            ethers.hexlify(pathData.slice(0, 20))
+          );
+          const fee = parseInt(
+            ethers.hexlify(pathData.slice(20, 23)).slice(2),
+            16
+          );
+          const tokenOut = ethers.getAddress(
+            ethers.hexlify(pathData.slice(-20))
+          );
 
           return {
             tokenIn,
@@ -533,32 +480,31 @@ Length: ${pathData.length}
             fee,
             amountIn: params.amountIn,
             amountOutMinimum: params.amountOutMinimum,
-            recipient: params.recipient
+            recipient: params.recipient,
           };
         } catch (error) {
-          console.error('❌ Error decoding multi-hop path:', error);
+          console.error("❌ Error decoding multi-hop path:", error);
           return null;
         }
       }
 
       console.log(`❌ Unsupported function: ${parsed.name}`);
       return null;
-
     } catch (error) {
-      console.error('Error decoding swap input:', error);
+      console.error("Error decoding swap input:", error);
       return null;
     }
   }
 
   private decodeUniversalRouterInput(data: string): DecodedSwapInput | null {
     try {
-      console.log('\n🔍 Decoding Universal Router input...');
-      
+      console.log("\n🔍 Decoding Universal Router input...");
+
       const iface = new ethers.Interface(UNIVERSAL_ROUTER_ABI);
       const parsed = iface.parseTransaction({ data });
 
-      if (!parsed || parsed.name !== 'execute') {
-        console.log('❌ Not an execute function call');
+      if (!parsed || parsed.name !== "execute") {
+        console.log("❌ Not an execute function call");
         return null;
       }
 
@@ -566,14 +512,14 @@ Length: ${pathData.length}
       const inputs = parsed.args[1];
 
       if (!commands || !inputs || !Array.isArray(inputs)) {
-        console.log('❌ Invalid commands or inputs');
+        console.log("❌ Invalid commands or inputs");
         return null;
       }
 
       // Find swap command index
       let swapCommandIndex = -1;
       const commandBytes = ethers.getBytes(commands);
-      
+
       for (let i = 0; i < commandBytes.length; i++) {
         // Check for any type of swap command
         if ([0x00, 0x01, 0x02, 0x03].includes(commandBytes[i])) {
@@ -583,27 +529,32 @@ Length: ${pathData.length}
       }
 
       if (swapCommandIndex === -1) {
-        console.log('❌ No swap command found');
+        console.log("❌ No swap command found");
         return null;
       }
-      
+
       // Parse swap input data
       const swapInput = inputs[swapCommandIndex];
-      
+
       if (!swapInput) {
-        console.log('❌ No swap input found');
+        console.log("❌ No swap input found");
         return null;
       }
 
       try {
         // Decode path from input
         const pathData = ethers.getBytes(swapInput);
-        
+
         // Extract addresses and fee
-        const tokenIn = ethers.getAddress(ethers.hexlify(pathData.slice(0, 20)));
-        const fee = parseInt(ethers.hexlify(pathData.slice(20, 23)).slice(2), 16);
+        const tokenIn = ethers.getAddress(
+          ethers.hexlify(pathData.slice(0, 20))
+        );
+        const fee = parseInt(
+          ethers.hexlify(pathData.slice(20, 23)).slice(2),
+          16
+        );
         const tokenOut = ethers.getAddress(ethers.hexlify(pathData.slice(-20)));
-        
+
         // Amount is after path data
         const amountInData = pathData.slice(43, 75); // Take 32 bytes for amount
         const amountIn = ethers.getBigInt(ethers.hexlify(amountInData));
@@ -622,14 +573,14 @@ Amount In: ${amountIn.toString()} wei
           fee,
           amountIn,
           amountOutMinimum: BigInt(0),
-          recipient: ethers.ZeroAddress
+          recipient: ethers.ZeroAddress,
         };
       } catch (error) {
-        console.error('❌ Error parsing swap data:', error);
+        console.error("❌ Error parsing swap data:", error);
         return null;
       }
     } catch (error) {
-      console.error('❌ Error decoding Universal Router input:', error);
+      console.error("❌ Error decoding Universal Router input:", error);
       return null;
     }
   }
