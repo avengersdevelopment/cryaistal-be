@@ -13,7 +13,7 @@ export class SimulationService {
             // Hardcoded values untuk simulasi
             const tokenIn = '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2'; // WETH address
             const tokenOut = '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'; // USDC address
-            const amountIn = ethers.utils.parseEther('0.1'); // 0.1 ETH
+            const amountIn = ethers.parseEther('0.1'); // 0.1 ETH
             
             // Simulate getting quote
             const quote = await this.uniswapService.getQuote(
@@ -38,7 +38,7 @@ export class SimulationService {
             console.error('Error in trade simulation:', error);
             return {
                 success: false,
-                error: error.message
+                error: error instanceof Error ? error.message : 'Unknown error'
             };
         }
     }
@@ -63,7 +63,7 @@ export class SimulationService {
 
         for (const scenario of scenarios) {
             try {
-                const amountIn = ethers.utils.parseEther(scenario.amountIn);
+                const amountIn = ethers.parseEther(scenario.amountIn);
                 const result = await this.simulateTradeWithHardcodedValues();
                 results.push({
                     ...scenario,
@@ -72,7 +72,7 @@ export class SimulationService {
             } catch (error) {
                 results.push({
                     ...scenario,
-                    error: error.message
+                    error: error instanceof Error ? error.message : 'Unknown error'
                 });
             }
         }

@@ -584,4 +584,19 @@ Amount In: ${amountIn.toString()} wei
       return null;
     }
   }
+
+  async getQuote(
+    tokenIn: string,
+    tokenOut: string,
+    amountIn: bigint
+  ): Promise<bigint> {
+    try {
+      // Simulasi quote sederhana (untuk testing)
+      const mockPrice = BigInt(1800); // 1 ETH = 1800 USDC
+      return (amountIn * mockPrice) / ethers.parseEther('1.0');
+    } catch (error) {
+      console.error('Error getting quote:', error);
+      throw error;
+    }
+  }
 }
