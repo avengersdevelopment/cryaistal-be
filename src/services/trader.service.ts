@@ -5,6 +5,7 @@ import { createClient } from "@supabase/supabase-js";
 import { ethers } from "ethers";
 import { UniswapService } from "./uniswap.service";
 import { WalletService } from "./wallet.service";
+import { SimulationService } from './simulation.service';
 
 const supabase = createClient(config.supabase.url, config.supabase.key);
 
@@ -103,10 +104,12 @@ export class TraderService {
   private requestQueue: RequestQueue[] = [];
   private lastProcessedBlock: number = 0;
   private processingBlocks: boolean = false;
+  private simulationService: SimulationService;
 
   constructor() {
     this.uniswapService = new UniswapService();
     this.walletService = new WalletService();
+    this.simulationService = new SimulationService();
 
     this.txCache = new Map();
     this.receiptCache = new Map();
@@ -1611,6 +1614,20 @@ Status:
 ==============================`);
     } catch (error) {
       console.error("Error stopping monitoring:", error);
+    }
+  }
+
+  async testSimulation() {
+    try {
+      // Test single trade simulation
+      const singleSimulation = await this.simulationService.simulateTradeWithHardcodedValues();
+      console.log('Single Trade Simulation Result:', singleSimulation);
+
+      // Test multiple trades simulation
+      const multipleSimulations = await this.simulationService.simulateMultipleTrades();
+      console.log('Multiple Trades Simulation Results:', multipleSimulations);
+    } catch (error) {
+      console.error('Error in simulation test:', error);
     }
   }
 }

@@ -1,0 +1,148 @@
+
+[nodemon] 3.1.9
+[nodemon] to restart at any time, enter `rs`
+[nodemon] watching path(s): src/**/*
+[nodemon] watching extensions: ts,js
+[nodemon] starting `ts-node ./src/index.ts`
+
+🔌 WEBSOCKET INITIALIZED
+=======================
+Chain: Base
+Time: 9:23:08 PM
+=======================
+(node:2912) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+
+💤 MONITORING STOPPED
+===================
+Reason: No active subscribers
+Time: 9:23:09 PM
+===================
+
+✅ MONITORING STOPPED SUCCESSFULLY
+==============================
+Time: 9:23:09 PM
+Status:
+- WebSocket: Disconnected
+- Block Monitoring: Stopped
+- Event Listeners: Removed
+- Queues: Cleared
+- Caches: Cleared
+==============================
+Error getting balance for base: Error: error:1C800064:Provider routines::bad decrypt
+    at Decipheriv.final (node:internal/crypto/cipher:184:29)
+    at WalletService.decrypt (/Users/dimaspurwanto/Documents/Personal/cryaistal-be/src/services/wallet.service.ts:40:27)
+    at WalletService.getWallet (/Users/dimaspurwanto/Documents/Personal/cryaistal-be/src/services/wallet.service.ts:119:29)
+    at processTicksAndRejections (node:internal/process/task_queues:105:5)
+    at async WalletService.getWalletBalance (/Users/dimaspurwanto/Documents/Personal/cryaistal-be/src/services/wallet.service.ts:160:22)
+    at async /Users/dimaspurwanto/Documents/Personal/cryaistal-be/src/commands/subscribe.command.ts:49:23
+    at async execute (/Users/dimaspurwanto/Documents/Personal/cryaistal-be/node_modules/telegraf/lib/composer.js:518:17)
+    at async /Users/dimaspurwanto/Documents/Personal/cryaistal-be/node_modules/telegraf/lib/composer.js:519:21
+    at async execute (/Users/dimaspurwanto/Documents/Personal/cryaistal-be/node_modules/telegraf/lib/composer.js:518:17)
+    at async /Users/dimaspurwanto/Documents/Personal/cryaistal-be/node_modules/telegraf/lib/composer.js:519:21 {
+  library: 'Provider routines',
+  reason: 'bad decrypt',
+  code: 'ERR_OSSL_BAD_DECRYPT'
+}
+Error in subscribe command: Error: error:1C800064:Provider routines::bad decrypt
+    at Decipheriv.final (node:internal/crypto/cipher:184:29)
+    at WalletService.decrypt (/Users/dimaspurwanto/Documents/Personal/cryaistal-be/src/services/wallet.service.ts:40:27)
+    at WalletService.getWallet (/Users/dimaspurwanto/Documents/Personal/cryaistal-be/src/services/wallet.service.ts:119:29)
+    at processTicksAndRejections (node:internal/process/task_queues:105:5)
+    at async WalletService.getWalletBalance (/Users/dimaspurwanto/Documents/Personal/cryaistal-be/src/services/wallet.service.ts:160:22)
+    at async /Users/dimaspurwanto/Documents/Personal/cryaistal-be/src/commands/subscribe.command.ts:49:23
+    at async execute (/Users/dimaspurwanto/Documents/Personal/cryaistal-be/node_modules/telegraf/lib/composer.js:518:17)
+    at async /Users/dimaspurwanto/Documents/Personal/cryaistal-be/node_modules/telegraf/lib/composer.js:519:21
+    at async execute (/Users/dimaspurwanto/Documents/Personal/cryaistal-be/node_modules/telegraf/lib/composer.js:518:17)
+    at async /Users/dimaspurwanto/Documents/Personal/cryaistal-be/node_modules/telegraf/lib/composer.js:519:21 {
+  library: 'Provider routines',
+  reason: 'bad decrypt',
+  code: 'ERR_OSSL_BAD_DECRYPT'
+}
+Error getting balance for base: Error: error:1C800064:Provider routines::bad decrypt
+    at Decipheriv.final (node:internal/crypto/cipher:184:29)
+    at WalletService.decrypt (/Users/dimaspurwanto/Documents/Personal/cryaistal-be/src/services/wallet.service.ts:40:27)
+    at WalletService.getWallet (/Users/dimaspurwanto/Documents/Personal/cryaistal-be/src/services/wallet.service.ts:119:29)
+    at processTicksAndRejections (node:internal/process/task_queues:105:5)
+    at async WalletService.getWalletBalance (/Users/dimaspurwanto/Documents/Personal/cryaistal-be/src/services/wallet.service.ts:160:22)
+    at async /Users/dimaspurwanto/Documents/Personal/cryaistal-be/src/commands/balance.command.ts:35:25
+    at async execute (/Users/dimaspurwanto/Documents/Personal/cryaistal-be/node_modules/telegraf/lib/composer.js:518:17)
+    at async /Users/dimaspurwanto/Documents/Personal/cryaistal-be/node_modules/telegraf/lib/composer.js:519:21
+    at async execute (/Users/dimaspurwanto/Documents/Personal/cryaistal-be/node_modules/telegraf/lib/composer.js:518:17)
+    at async /Users/dimaspurwanto/Documents/Personal/cryaistal-be/node_modules/telegraf/lib/composer.js:519:21 {
+  library: 'Provider routines',
+  reason: 'bad decrypt',
+  code: 'ERR_OSSL_BAD_DECRYPT'
+}
+Error fetching balance: Error: error:1C800064:Provider routines::bad decrypt
+    at Decipheriv.final (node:internal/crypto/cipher:184:29)
+    at WalletService.decrypt (/Users/dimaspurwanto/Documents/Personal/cryaistal-be/src/services/wallet.service.ts:40:27)
+    at WalletService.getWallet (/Users/dimaspurwanto/Documents/Personal/cryaistal-be/src/services/wallet.service.ts:119:29)
+    at processTicksAndRejections (node:internal/process/task_queues:105:5)
+    at async WalletService.getWalletBalance (/Users/dimaspurwanto/Documents/Personal/cryaistal-be/src/services/wallet.service.ts:160:22)
+    at async /Users/dimaspurwanto/Documents/Personal/cryaistal-be/src/commands/balance.command.ts:35:25
+    at async execute (/Users/dimaspurwanto/Documents/Personal/cryaistal-be/node_modules/telegraf/lib/composer.js:518:17)
+    at async /Users/dimaspurwanto/Documents/Personal/cryaistal-be/node_modules/telegraf/lib/composer.js:519:21
+    at async execute (/Users/dimaspurwanto/Documents/Personal/cryaistal-be/node_modules/telegraf/lib/composer.js:518:17)
+    at async /Users/dimaspurwanto/Documents/Personal/cryaistal-be/node_modules/telegraf/lib/composer.js:519:21 {
+  library: 'Provider routines',
+  reason: 'bad decrypt',
+  code: 'ERR_OSSL_BAD_DECRYPT'
+}
+Error getting balance for base: Error: error:1C800064:Provider routines::bad decrypt
+    at Decipheriv.final (node:internal/crypto/cipher:184:29)
+    at WalletService.decrypt (/Users/dimaspurwanto/Documents/Personal/cryaistal-be/src/services/wallet.service.ts:40:27)
+    at WalletService.getWallet (/Users/dimaspurwanto/Documents/Personal/cryaistal-be/src/services/wallet.service.ts:119:29)
+    at processTicksAndRejections (node:internal/process/task_queues:105:5)
+    at async WalletService.getWalletBalance (/Users/dimaspurwanto/Documents/Personal/cryaistal-be/src/services/wallet.service.ts:160:22)
+    at async /Users/dimaspurwanto/Documents/Personal/cryaistal-be/src/commands/balance.command.ts:35:25
+    at async execute (/Users/dimaspurwanto/Documents/Personal/cryaistal-be/node_modules/telegraf/lib/composer.js:518:17)
+    at async /Users/dimaspurwanto/Documents/Personal/cryaistal-be/node_modules/telegraf/lib/composer.js:519:21
+    at async execute (/Users/dimaspurwanto/Documents/Personal/cryaistal-be/node_modules/telegraf/lib/composer.js:518:17)
+    at async /Users/dimaspurwanto/Documents/Personal/cryaistal-be/node_modules/telegraf/lib/composer.js:519:21 {
+  library: 'Provider routines',
+  reason: 'bad decrypt',
+  code: 'ERR_OSSL_BAD_DECRYPT'
+}
+Error fetching balance: Error: error:1C800064:Provider routines::bad decrypt
+    at Decipheriv.final (node:internal/crypto/cipher:184:29)
+    at WalletService.decrypt (/Users/dimaspurwanto/Documents/Personal/cryaistal-be/src/services/wallet.service.ts:40:27)
+    at WalletService.getWallet (/Users/dimaspurwanto/Documents/Personal/cryaistal-be/src/services/wallet.service.ts:119:29)
+    at processTicksAndRejections (node:internal/process/task_queues:105:5)
+    at async WalletService.getWalletBalance (/Users/dimaspurwanto/Documents/Personal/cryaistal-be/src/services/wallet.service.ts:160:22)
+    at async /Users/dimaspurwanto/Documents/Personal/cryaistal-be/src/commands/balance.command.ts:35:25
+    at async execute (/Users/dimaspurwanto/Documents/Personal/cryaistal-be/node_modules/telegraf/lib/composer.js:518:17)
+    at async /Users/dimaspurwanto/Documents/Personal/cryaistal-be/node_modules/telegraf/lib/composer.js:519:21
+    at async execute (/Users/dimaspurwanto/Documents/Personal/cryaistal-be/node_modules/telegraf/lib/composer.js:518:17)
+    at async /Users/dimaspurwanto/Documents/Personal/cryaistal-be/node_modules/telegraf/lib/composer.js:519:21 {
+  library: 'Provider routines',
+  reason: 'bad decrypt',
+  code: 'ERR_OSSL_BAD_DECRYPT'
+}
+^Cdimaspurwanto@Dimass-MacBook-Pro cryaistal-be % > telegram-bot@1.0.0 dev
+> nodemon
+
+[nodemon] 3.1.9
+[nodemon] to restart at any time, enter `rs`
+[nodemon] watching path(s): src/**/*
+[nodemon] watching extensions: ts,js
+[nodemon] starting `ts-node ./src/index.ts`
+
+🔌 WEBSOCKET INITIALIZEzsh: command not found: devdimaspurwanto@Dimass-MacBook-Pro cryaistal-be % > telegram-bot@1.0.0 dev
+> nodemon
+
+[nodemon] 3.1.9
+[nodemon] to restart at any time, enter `rs`
+[nodemon] watching path(s): src/**/*
+[nodemon] watching extensions: ts,js
+[nodemon] starting `ts-node ./src/index.ts`
+
+🔌 WEBSOCKET INITIALIZEzsh: command not found: devdimaspurwanto@Dimass-MacBook-Pro cryaistal-be % > telegram-bot@1.0.0 dev
+> nodemon
+
+[nodemon] 3.1.9
+[nodemon] to restart at any time, enter `rs`
+[nodemon] watching path(s): src/**/*
+[nodemon] watching extensions: ts,js
+[nodemon] starting `ts-node ./src/index.ts`
+
