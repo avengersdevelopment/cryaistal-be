@@ -3,31 +3,29 @@ import { UniswapService } from './uniswap.service';
 
 export class SimulationService {
     private uniswapService: UniswapService;
+    private readonly WETH = "0x4200000000000000000000000000000000000006"; // WETH di Base
+    private readonly USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"; // USDC di Base
 
     constructor() {
         this.uniswapService = new UniswapService();
     }
 
-    async simulateTradeWithHardcodedValues() {
+    async simulateTradeWithRealData(amountInEth: string) {
         try {
-            // Hardcoded values untuk simulasi
-            const tokenIn = '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2'; // WETH address
-            const tokenOut = '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'; // USDC address
-            const amountIn = ethers.parseEther('0.1'); // 0.1 ETH
+            const amountIn = ethers.parseEther(amountInEth);
             
-            // Simulate getting quote
-            const quote = await this.uniswapService.getQuote(
-                tokenIn,
-                tokenOut,
+            // Get real quote from Uniswap V3 pool
+            const quoteAmount = await this.uniswapService.getQuote(
+                this.WETH,
+                this.USDC,
                 amountIn
             );
 
-            // Simulate trade parameters
             const simulatedResult = {
-                tokenIn,
-                tokenOut,
-                amountIn: amountIn.toString(),
-                estimatedAmountOut: quote.toString(),
+                tokenIn: this.WETH,
+                tokenOut: this.USDC,
+                amountIn: ethers.formatEther(amountIn) + ' ETH',
+                estimatedAmountOut: (Number(quoteAmount) / 1e6).toFixed(2) + ' USDC', // Format USDC with 6 decimals
                 estimatedGas: '200000',
                 simulationTime: new Date().toISOString(),
                 success: true
@@ -35,7 +33,7 @@ export class SimulationService {
 
             return simulatedResult;
         } catch (error) {
-            console.error('Error in trade simulation:', error);
+            console.error('Error in real trade simulation:', error);
             return {
                 success: false,
                 error: error instanceof Error ? error.message : 'Unknown error'
@@ -46,16 +44,24 @@ export class SimulationService {
     async simulateMultipleTrades() {
         const scenarios = [
             {
+                description: 'ETH to USDC - Micro Amount',
+                amountIn: '0.0001'
+            },
+            {
                 description: 'ETH to USDC - Small Amount',
-                amountIn: '0.1'
+                amountIn: '0.001'
             },
             {
                 description: 'ETH to USDC - Medium Amount',
-                amountIn: '1.0'
+                amountIn: '0.01'
+            },
+            {
+                description: 'ETH to USDC - Standard Amount',
+                amountIn: '0.1'
             },
             {
                 description: 'ETH to USDC - Large Amount',
-                amountIn: '5.0'
+                amountIn: '1.0'
             }
         ];
 
@@ -63,8 +69,7 @@ export class SimulationService {
 
         for (const scenario of scenarios) {
             try {
-                const amountIn = ethers.parseEther(scenario.amountIn);
-                const result = await this.simulateTradeWithHardcodedValues();
+                const result = await this.simulateTradeWithRealData(scenario.amountIn);
                 results.push({
                     ...scenario,
                     result

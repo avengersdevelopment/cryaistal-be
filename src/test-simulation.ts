@@ -5,7 +5,7 @@ async function runSimulation() {
         const simulationService = new SimulationService();
         
         console.log('\n🔄 Menjalankan Single Trade Simulation...');
-        const singleTrade = await simulationService.simulateTradeWithHardcodedValues();
+        const singleTrade = await simulationService.simulateTradeWithRealData('0.1'); // 0.1 ETH
         console.log('\n📊 Hasil Single Trade:');
         console.log('=======================');
         if (singleTrade.success && 'amountIn' in singleTrade) {

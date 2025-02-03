@@ -41,7 +41,15 @@ const ERC20_ABI = [
 
 // QuoterV2 ABI
 const QUOTER_V2_ABI = [
-  "function quoteExactInputSingle((address tokenIn, address tokenOut, uint264 amountIn, uint24 fee, uint160 sqrtPriceLimitX96) params) external returns (uint256 amountOut, uint160 sqrtPriceX96After, uint32 initializedTicksCrossed, uint256 gasEstimate)",
+  "function quoteExactInputSingle(address tokenIn, address tokenOut, uint24 fee, uint256 amountIn, uint160 sqrtPriceLimitX96) external view returns (uint256 amountOut)",
+];
+
+// Tambahkan Pool ABI
+const UNISWAP_V3_POOL_ABI = [
+    "function slot0() external view returns (uint160 sqrtPriceX96, int24 tick, uint16 observationIndex, uint16 observationCardinality, uint16 observationCardinalityNext, uint8 feeProtocol, bool unlocked)",
+    "function liquidity() external view returns (uint128)",
+    "function token0() external view returns (address)",
+    "function token1() external view returns (address)"
 ];
 
 interface SwapParams {
@@ -388,8 +396,7 @@ Min Output: ${ethers.formatUnits(minOut, 6)} USDC`);
 
   decodeSwapInput(data: string): DecodedSwapInput | null {
     try {
-      console.log(`
-🔍 DECODING TRANSACTION DATA
+      console.log(`🔍 DECODING TRANSACTION DATA
 =========================
 Data: ${data.slice(0, 66)}...
 Length: ${data.length}
@@ -591,12 +598,47 @@ Amount In: ${amountIn.toString()} wei
     amountIn: bigint
   ): Promise<bigint> {
     try {
-      // Simulasi quote sederhana (untuk testing)
-      const mockPrice = BigInt(1800); // 1 ETH = 1800 USDC
-      return (amountIn * mockPrice) / ethers.parseEther('1.0');
+      // WETH-USDC pool di Base (0.05% fee tier)
+      const POOL_ADDRESS = "0x06959273E9A65433De71F5A452D529544E07dDD0";
+      
+      const pool = new ethers.Contract(
+        POOL_ADDRESS,
+        UNISWAP_V3_POOL_ABI,
+        this.provider
+      );
+
+      const [slot0Data, liquidity] = await Promise.all([
+        pool.slot0(),
+        pool.liquidity()
+      ]);
+
+      const sqrtPriceX96 = slot0Data.sqrtPriceX96;
+      const price = (Number(sqrtPriceX96) ** 2) / (2 ** 192);
+      
+      // Convert price to USDC (considering 6 decimals for USDC)
+      const amountOut = (amountIn * BigInt(Math.floor(price * 1e6))) / BigInt(1e18);
+      
+      console.log(`
+💰 Quote Details:
+===============
+Input: ${ethers.formatEther(amountIn)} ETH
+Price: $${price.toFixed(2)}
+Output: ${ethers.formatUnits(amountOut, 6)} USDC
+===============`);
+
+      return amountOut;
     } catch (error) {
-      console.error('Error getting quote:', error);
+      console.error('Error getting real quote:', error);
       throw error;
     }
   }
+
+  getQuoterContract() {
+    return new ethers.Contract(
+      this.QUOTER_V2,
+      QUOTER_V2_ABI,
+      this.provider
+    );
+  }
 }
+
