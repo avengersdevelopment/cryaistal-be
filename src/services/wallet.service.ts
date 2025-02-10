@@ -1,23 +1,87 @@
-import { Wallet, JsonRpcProvider } from "ethers";
+import { Wallet, JsonRpcProvider, WebSocketProvider, ethers } from "ethers";
 import * as crypto from "crypto";
 import { Chain, UserWallet } from "../types";
 import { CHAIN_CONFIGS } from "../config/chains";
 import { config } from "../config/config";
 import { createClient } from "@supabase/supabase-js";
-import { ethers } from "ethers";
 
 const supabase = createClient(config.supabase.url, config.supabase.key);
 
 export class WalletService {
   private readonly encryptionKey: Buffer;
+  private providers: Map<Chain, ethers.Provider> = new Map();
+  private readonly MAX_RETRIES = 3;
+  private readonly RETRY_DELAY = 1000;
 
   constructor() {
     const key = process.env.ENCRYPTION_KEY;
     if (!key) {
       throw new Error("ENCRYPTION_KEY is required");
     }
-    // Create a 32-byte key using SHA256
     this.encryptionKey = crypto.createHash("sha256").update(key).digest();
+    this.initializeProviders();
+  }
+
+  private async initializeProviders() {
+    try {
+      // Initialize HTTP provider with proper configuration
+      const httpProvider = new JsonRpcProvider(config.quicknode.rpc_url, {
+        chainId: config.base.chainId,
+        name: "base",
+      });
+
+      // Test the connection
+      await httpProvider.getBlockNumber();
+
+      // Set the HTTP provider
+      this.providers.set(Chain.BASE, httpProvider);
+
+      console.log(`
+🔌 PROVIDER INITIALIZED
+======================
+Chain: Base
+Provider: HTTP
+Status: Connected
+Block: ${await httpProvider.getBlockNumber()}
+======================`);
+    } catch (error) {
+      console.error("Error initializing provider:", error);
+      throw error;
+    }
+  }
+
+  private async getProvider(chain: Chain): Promise<ethers.Provider> {
+    let provider = this.providers.get(chain);
+    let retries = 0;
+
+    while (!provider && retries < this.MAX_RETRIES) {
+      try {
+        await this.initializeProviders();
+        provider = this.providers.get(chain);
+        if (provider) {
+          // Test the connection
+          await provider.getBlockNumber();
+          break;
+        }
+      } catch (error) {
+        console.error(
+          `Provider initialization attempt ${retries + 1} failed:`,
+          error
+        );
+        retries++;
+        if (retries < this.MAX_RETRIES) {
+          await new Promise((resolve) => setTimeout(resolve, this.RETRY_DELAY));
+        }
+      }
+    }
+
+    if (!provider) {
+      throw new Error(
+        `Failed to initialize provider for chain ${chain} after ${this.MAX_RETRIES} attempts`
+      );
+    }
+
+    return provider;
   }
 
   private encrypt(text: string): string {
@@ -43,13 +107,10 @@ export class WalletService {
 
   async createWallet(userId: string, chain: Chain): Promise<UserWallet> {
     const chainConfig = CHAIN_CONFIGS[chain];
-    const provider = new JsonRpcProvider(
-      chainConfig.rpc_url,
-      {
-        chainId: chainConfig.chainId,
-        name: chainConfig.name.toLowerCase()
-      }
-    );
+    const provider = new JsonRpcProvider(chainConfig.rpc_url, {
+      chainId: chainConfig.chainId,
+      name: chainConfig.name.toLowerCase(),
+    });
     const wallet = Wallet.createRandom().connect(provider);
 
     const userWallet: UserWallet = {
@@ -75,14 +136,7 @@ export class WalletService {
     userId: string,
     chain: Chain
   ): Promise<{ wallet: UserWallet; privateKey: string }> {
-    const chainConfig = CHAIN_CONFIGS[chain];
-    const provider = new JsonRpcProvider(
-      chainConfig.rpc_url,
-      {
-        chainId: chainConfig.chainId,
-        name: chainConfig.name.toLowerCase()
-      }
-    );
+    const provider = await this.getProvider(chain);
     const randomWallet = Wallet.createRandom();
     const wallet = randomWallet.connect(provider);
 
@@ -105,66 +159,37 @@ export class WalletService {
     return { wallet: userWallet, privateKey: wallet.privateKey };
   }
 
-  async getWallet(userId: string, chain: Chain): Promise<Wallet> {
-    const { data, error } = await supabase
-      .from("user_wallets")
-      .select("*")
-      .eq("user_id", userId)
-      .eq("chain", chain)
-      .single();
-
-    if (error) throw error;
-    if (!data) throw new Error("Wallet not found");
-
-    const privateKey = this.decrypt(data.encrypted_private_key);
-    const chainConfig = CHAIN_CONFIGS[chain];
-
-    if (!chainConfig.rpc_url) {
-      throw new Error(`RPC URL not configured for ${chain} network`);
-    }
-
-    // Initialize provider dengan konfigurasi spesifik untuk BASE
-    const provider = new JsonRpcProvider(
-      chainConfig.rpc_url,
-      {
-        chainId: chainConfig.chainId,
-        name: chainConfig.name.toLowerCase()
-      }
-    );
-
+  async getWallet(userId: string, chain: Chain): Promise<ethers.Wallet> {
     try {
-      // Test provider connection dengan retry
-      let retryCount = 0;
-      const maxRetries = 3;
-      
-      while (retryCount < maxRetries) {
-        try {
-          await provider.getNetwork();
-          break;
-        } catch (err) {
-          retryCount++;
-          if (retryCount === maxRetries) throw err;
-          await new Promise(resolve => setTimeout(resolve, 1000 * retryCount)); // exponential backoff
-        }
-      }
-    } catch (error) {
-      console.error(`Provider connection error for ${chain}:`, error);
-      throw new Error(`Could not connect to ${chain} network. Please try again later.`);
-    }
+      const { data: wallet, error } = await supabase
+        .from("user_wallets")
+        .select("encrypted_private_key")
+        .eq("user_id", userId)
+        .eq("chain", chain)
+        .single();
 
-    return new Wallet(privateKey, provider);
+      if (error || !wallet?.encrypted_private_key) {
+        throw new Error(
+          `Wallet not found for user ${userId} on chain ${chain}`
+        );
+      }
+
+      const provider = await this.getProvider(chain);
+      const privateKey = this.decrypt(wallet.encrypted_private_key);
+
+      return new ethers.Wallet(privateKey, provider);
+    } catch (error) {
+      console.error("Error getting wallet:", error);
+      throw error;
+    }
   }
 
-  async getWalletBalance(userId: string, chain: Chain): Promise<string> {
+  async getWalletBalance(userId: string, chain: Chain): Promise<bigint> {
     try {
       const wallet = await this.getWallet(userId, chain);
-      if (!wallet.provider) {
-        throw new Error("Provider not connected");
-      }
-      const balance = await wallet.provider.getBalance(wallet.address);
-      return balance.toString();
+      return await wallet.provider!.getBalance(wallet.address);
     } catch (error) {
-      console.error(`Error getting balance for ${chain}:`, error);
+      console.error("Error getting wallet balance:", error);
       throw error;
     }
   }
@@ -178,7 +203,7 @@ export class WalletService {
     try {
       // Get user's wallet
       const wallet = await this.getWallet(userId, chain);
-      
+
       // Convert amount to wei
       const amountWei = ethers.parseEther(amount);
 
