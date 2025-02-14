@@ -204,7 +204,6 @@ export class UniswapService {
   }
 
   async getQuote(params: SwapParams): Promise<string> {
-    console.log("Starting quote...", params);
     const quoterContract = new Contract(QUOTER, QUOTER_ABI, this.provider);
 
     try {
@@ -256,8 +255,6 @@ export class UniswapService {
       }
 
       const quotedAmountOut = await this.getQuote(params);
-      console.log("Quoted amount out:", quotedAmountOut);
-
       const slippageTolerance = params.slippage || DEFAULT_SLIPPAGE;
       const minimumAmountOut =
         BigInt(quotedAmountOut) -
@@ -272,26 +269,28 @@ export class UniswapService {
       );
 
       const swapParams = {
-        tokenIn: params.tokenIn,
+        tokenIn: this.validateTokenAddress(params.tokenIn),
         tokenOut: params.tokenOut,
         fee: poolInfo.fee,
         recipient: wallet.address,
-        deadline: Math.floor(Date.now() / 1000) + 60 * 20,
         amountIn: params.amountIn,
-        amountOutMinimum: minimumAmountOut.toString(),
+        amountOutMinimum: minimumAmountOut, // should be minimumAmountOut.toString(), set 0 for testing
         sqrtPriceLimitX96: 0,
       };
       console.log("Swap params", swapParams);
 
       const value =
-        params.tokenIn.toLowerCase() === this.WETH.toLowerCase()
+        this.validateTokenAddress(params.tokenIn).toLowerCase() ===
+        this.WETH.toLowerCase()
           ? params.amountIn
           : "0";
-      console.log("Value:", value);
 
+      // wait for 2 seconds before sending the tx
+      await new Promise((resolve) => setTimeout(resolve, 2000));
       const tx = await router.exactInputSingle(swapParams, {
         value,
         gasPrice: params.gasPrice,
+        gasLimit: 3000000,
       });
       console.log("Swap tx:", tx.hash);
 
