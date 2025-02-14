@@ -7,6 +7,7 @@ import { UniswapService } from "./uniswap.service";
 import { WalletService } from "./wallet.service";
 import { POOL_MANAGER } from "../config/constants";
 import POOL_MANAGER_ABI from "../config/abis/uniswapv4poolmanager.json";
+import fs from "fs";
 
 const supabase = createClient(config.supabase.url, config.supabase.key);
 
@@ -172,7 +173,7 @@ Liquidity: ${liquidity}
 Tick: ${tick}
 ====================`);
 
-        await this.processTraderTransaction(tx);
+        await this.processTraderTransaction(tx, poolId);
       } catch (error) {
         console.error("Error processing V4 swap event:", error);
       }
@@ -189,7 +190,10 @@ Trusted Traders: ${this.trustedTraderAddresses.size}
 ========================`);
   }
 
-  private async processTraderTransaction(tx: ethers.TransactionResponse) {
+  private async processTraderTransaction(
+    tx: ethers.TransactionResponse,
+    poolId: string
+  ) {
     if (this.processedTxCache.has(tx.hash)) return;
 
     try {
@@ -203,7 +207,7 @@ Data Length: ${tx.data.length}
 =======================`);
 
       // Decode swap data
-      const decodedSwap = await this.uniswapService.decodeSwapInput(tx.data);
+      const decodedSwap = this.uniswapService.decodeSwapInput(tx.data);
 
       if (!decodedSwap) {
         console.log("❌ Failed to decode swap data");
@@ -227,7 +231,12 @@ Amount In: ${decodedSwap.amountIn.toString()} wei
       // Process for each subscriber
       for (const subscriber of subscribers) {
         try {
-          await this.copyTradeForSubscriber(subscriber, tx, decodedSwap);
+          await this.copyTradeForSubscriber(
+            subscriber,
+            tx,
+            decodedSwap,
+            poolId
+          );
         } catch (error) {
           console.error(
             `Error copying trade for subscriber ${subscriber.telegram_id}:`,
@@ -243,7 +252,8 @@ Amount In: ${decodedSwap.amountIn.toString()} wei
   private async copyTradeForSubscriber(
     subscriber: any,
     tx: ethers.TransactionResponse,
-    decodedSwap: any
+    decodedSwap: any,
+    poolId: string
   ) {
     try {
       console.log(`
@@ -315,6 +325,7 @@ Fee: ${decodedSwap.fee}
 
       // Execute the copy trade
       const result = await this.uniswapService.swapExactInputSingle(
+        poolId,
         wallet,
         Chain.BASE,
         {
@@ -326,6 +337,7 @@ Fee: ${decodedSwap.fee}
           gasPrice,
         }
       );
+      console.log("Done", result);
 
       if (result.success) {
         console.log(`
@@ -355,6 +367,7 @@ Error: ${result.error}
 ==================`);
       }
     } catch (error) {
+      console.log("A");
       console.error(
         `Error copying trade for subscriber ${subscriber.telegram_id}:`,
         error
@@ -410,6 +423,12 @@ Error: ${result.error}
     } catch (error) {
       console.error("Error logging trade metrics:", error);
     }
+  }
+
+  private logEventToJSONAndSave(event: any) {
+    console.log("Saving event", event);
+    // Save to file
+    fs.writeFileSync("event.json", event);
   }
 
   private async getActiveSubscribers() {

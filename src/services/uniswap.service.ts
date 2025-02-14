@@ -81,6 +81,7 @@ export class UniswapService {
     try {
       if (
         address === ZeroAddress ||
+        address === "0x0000000000000000000000400000000000000000" ||
         address === "0x0000000000000000000000400000000000000000"
       ) {
         return this.WETH;
@@ -91,8 +92,13 @@ export class UniswapService {
     }
   }
 
-  private async getPoolInfo(tokenIn: string, tokenOut: string) {
+  async getPoolInfo(
+    tokenIn: string,
+    tokenOut: string,
+    poolIdentifier?: string
+  ) {
     try {
+      console.log("Starting get pool info...", poolIdentifier);
       const normalizedTokenIn = this.validateTokenAddress(tokenIn);
       const normalizedTokenOut = this.validateTokenAddress(tokenOut);
 
@@ -106,12 +112,20 @@ export class UniswapService {
       const hooks = "0x0000000000000000000000000000000000000000"; // Zero address for no hooks
 
       // Calculate pool ID using keccak256
-      const poolId = keccak256(
-        AbiCoder.defaultAbiCoder().encode(
-          ["address", "address", "uint24", "int24", "address"],
-          [token0Address, token1Address, fee, tickSpacing, hooks]
-        )
-      );
+      const poolId =
+        poolIdentifier ||
+        keccak256(
+          AbiCoder.defaultAbiCoder().encode(
+            ["address", "address", "uint24", "int24", "address"],
+            [
+              this.validateTokenAddress(token0Address),
+              token1Address,
+              fee,
+              tickSpacing,
+              hooks,
+            ]
+          )
+        );
 
       const stateViewContract = new Contract(
         STATE_VIEW,
@@ -129,11 +143,12 @@ export class UniswapService {
 
         const token0IsETH =
           token0Address.toLowerCase() === this.WETH.toLowerCase();
-        const price = token0IsETH ? 1800n : 1n / 1800n;
+        const price = token0IsETH ? 1800 : 1 / 1800;
 
-        const initialSqrtPriceX96 = toBigInt(
-          Math.floor(Math.sqrt(Number(price)) * 2 ** 96)
+        const initialSqrtPriceX96 = BigInt(
+          Math.floor(Math.sqrt(price) * 2 ** 96)
         );
+        console.log("Initial sqrt price:", initialSqrtPriceX96);
 
         const poolManagerContract = new Contract(
           POOL_MANAGER,
@@ -188,18 +203,21 @@ export class UniswapService {
     }
   }
 
-  private async getQuote(params: SwapParams): Promise<string> {
+  async getQuote(params: SwapParams): Promise<string> {
+    console.log("Starting quote...", params);
     const quoterContract = new Contract(QUOTER, QUOTER_ABI, this.provider);
 
     try {
       const quotedAmountOut =
         await quoterContract.quoteExactInputSingle.staticCall({
-          tokenIn: params.tokenIn,
+          tokenIn: this.validateTokenAddress(params.tokenIn),
           tokenOut: params.tokenOut,
           fee: params.fee,
           amountIn: params.amountIn,
           sqrtPriceLimitX96: 0,
         });
+
+      console.log("Quoted amount out:", quotedAmountOut);
 
       return quotedAmountOut[0].toString();
     } catch (error) {
@@ -209,12 +227,17 @@ export class UniswapService {
   }
 
   async swapExactInputSingle(
+    poolId: string,
     wallet: Wallet,
-    chain: Chain,
+    _chain: Chain,
     params: SwapParams
   ): Promise<SwapResult> {
     try {
-      const poolInfo = await this.getPoolInfo(params.tokenIn, params.tokenOut);
+      const poolInfo = await this.getPoolInfo(
+        params.tokenIn,
+        params.tokenOut,
+        poolId
+      );
 
       if (params.tokenIn.toLowerCase() !== this.WETH.toLowerCase()) {
         const tokenContract = new Contract(
@@ -233,6 +256,7 @@ export class UniswapService {
       }
 
       const quotedAmountOut = await this.getQuote(params);
+      console.log("Quoted amount out:", quotedAmountOut);
 
       const slippageTolerance = params.slippage || DEFAULT_SLIPPAGE;
       const minimumAmountOut =
@@ -257,16 +281,19 @@ export class UniswapService {
         amountOutMinimum: minimumAmountOut.toString(),
         sqrtPriceLimitX96: 0,
       };
+      console.log("Swap params", swapParams);
 
       const value =
         params.tokenIn.toLowerCase() === this.WETH.toLowerCase()
           ? params.amountIn
           : "0";
+      console.log("Value:", value);
 
       const tx = await router.exactInputSingle(swapParams, {
         value,
         gasPrice: params.gasPrice,
       });
+      console.log("Swap tx:", tx.hash);
 
       const receipt = await tx.wait();
 
