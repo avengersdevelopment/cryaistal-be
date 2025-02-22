@@ -9,6 +9,7 @@ import { setupPerformanceCommand } from "./commands/performance.command";
 import { authMiddleware } from "./middlewares/auth.middleware";
 import { setupPositionCommand } from "./commands/position.command";
 import { setupWithdrawCommand } from "./commands/withdraw.command";
+import { DEPLOYMENTS_ADDRESS } from "./config/constants";
 
 // Load environment variables
 dotenv.config();

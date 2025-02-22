@@ -23,12 +23,7 @@ import QUOTER_ABI from "../config/abis/quoter.json";
 import UNIVERSAL_ROUTER_ABI from "../config/abis/universalrouter.json";
 import POOL_MANAGER_ABI from "../config/abis/uniswapv4poolmanager.json";
 import STATE_VIEW_ABI from "../config/abis/stateview.json";
-import {
-  POOL_MANAGER,
-  QUOTER,
-  UNIVERSAL_ROUTER,
-  STATE_VIEW,
-} from "../config/constants";
+import { DEPLOYMENTS_ADDRESS } from "../config/constants";
 
 // Constants
 const DEFAULT_SLIPPAGE = 0.5; // 0.5%
@@ -71,9 +66,9 @@ export class UniswapService {
   private readonly USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 
   constructor() {
-    this.provider = new JsonRpcProvider(config.quicknode.rpc_url, {
-      chainId: config.base.chainId,
-      name: "base",
+    this.provider = new JsonRpcProvider(DEPLOYMENTS_ADDRESS.RPC_URL, {
+      chainId: DEPLOYMENTS_ADDRESS.CHAIN_ID,
+      name: DEPLOYMENTS_ADDRESS.NAME,
     });
   }
 
@@ -128,7 +123,7 @@ export class UniswapService {
         );
 
       const stateViewContract = new Contract(
-        STATE_VIEW,
+        DEPLOYMENTS_ADDRESS.STATE_VIEW,
         STATE_VIEW_ABI,
         this.provider
       );
@@ -151,7 +146,7 @@ export class UniswapService {
         console.log("Initial sqrt price:", initialSqrtPriceX96);
 
         const poolManagerContract = new Contract(
-          POOL_MANAGER,
+          DEPLOYMENTS_ADDRESS.POOL_MANAGER,
           POOL_MANAGER_ABI,
           this.provider
         );
@@ -204,7 +199,11 @@ export class UniswapService {
   }
 
   async getQuote(params: SwapParams): Promise<string> {
-    const quoterContract = new Contract(QUOTER, QUOTER_ABI, this.provider);
+    const quoterContract = new Contract(
+      DEPLOYMENTS_ADDRESS.QUOTER,
+      QUOTER_ABI,
+      this.provider
+    );
 
     try {
       const quotedAmountOut =
@@ -248,7 +247,7 @@ export class UniswapService {
         );
 
         const tx = await tokenContract.approve(
-          UNIVERSAL_ROUTER,
+          DEPLOYMENTS_ADDRESS.UNIVERSAL_ROUTER,
           params.amountIn
         );
         await tx.wait();
@@ -263,7 +262,7 @@ export class UniswapService {
           BigInt(10000);
 
       const router = new Contract(
-        UNIVERSAL_ROUTER,
+        DEPLOYMENTS_ADDRESS.UNIVERSAL_ROUTER,
         UNIVERSAL_ROUTER_ABI,
         wallet
       );

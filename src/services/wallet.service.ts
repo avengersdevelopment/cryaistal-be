@@ -4,6 +4,7 @@ import { Chain, UserWallet } from "../types";
 import { CHAIN_CONFIGS } from "../config/chains";
 import { config } from "../config/config";
 import { createClient } from "@supabase/supabase-js";
+import { DEPLOYMENTS_ADDRESS } from "../config/constants";
 
 const supabase = createClient(config.supabase.url, config.supabase.key);
 
@@ -25,9 +26,9 @@ export class WalletService {
   private async initializeProviders() {
     try {
       // Initialize HTTP provider with proper configuration
-      const httpProvider = new JsonRpcProvider(config.quicknode.rpc_url, {
-        chainId: config.base.chainId,
-        name: "base",
+      const httpProvider = new JsonRpcProvider(DEPLOYMENTS_ADDRESS.RPC_URL, {
+        chainId: DEPLOYMENTS_ADDRESS.CHAIN_ID,
+        name: DEPLOYMENTS_ADDRESS.NAME,
       });
 
       // Test the connection

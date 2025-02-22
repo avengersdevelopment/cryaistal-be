@@ -5,8 +5,8 @@ import { createClient } from "@supabase/supabase-js";
 import { ethers } from "ethers";
 import { UniswapService } from "./uniswap.service";
 import { WalletService } from "./wallet.service";
-import { POOL_MANAGER } from "../config/constants";
 import POOL_MANAGER_ABI from "../config/abis/uniswapv4poolmanager.json";
+import { DEPLOYMENTS_ADDRESS } from "../config/constants";
 import fs from "fs";
 
 const supabase = createClient(config.supabase.url, config.supabase.key);
@@ -49,9 +49,9 @@ export class TraderService {
 
   private async initializeProvider() {
     try {
-      this.provider = new ethers.WebSocketProvider(config.quicknode.ws_url, {
-        chainId: config.base.chainId,
-        name: "base",
+      this.provider = new ethers.WebSocketProvider(DEPLOYMENTS_ADDRESS.WS_URL, {
+        chainId: DEPLOYMENTS_ADDRESS.CHAIN_ID,
+        name: DEPLOYMENTS_ADDRESS.NAME,
       });
 
       console.log(`
@@ -115,7 +115,7 @@ Time: ${new Date().toLocaleTimeString()}
 
     // Monitor Uniswap V4 Pool Manager Swap events
     const poolSwapFilter = {
-      address: POOL_MANAGER,
+      address: DEPLOYMENTS_ADDRESS.POOL_MANAGER,
       topics: [swapEvent.topicHash],
     };
 
@@ -165,8 +165,8 @@ Time: ${new Date().toLocaleTimeString()}
 Hash: ${log.transactionHash}
 Pool ID: ${poolId}
 Trader: ${sender}
-Amount ETH: ${amount0Str} ${amount0 < 0n ? "OUT" : "IN"}
-Amount USDC: ${amount1Str} ${amount1 < 0n ? "OUT" : "IN"}
+Amount IN: ${amount0Str} ${amount0 < 0n ? "OUT" : "IN"}
+Amount OUT: ${amount1Str} ${amount1 < 0n ? "OUT" : "IN"}
 Fee: ${fee}
 Price: ${sqrtPriceX96}
 Liquidity: ${liquidity}
@@ -184,7 +184,7 @@ Tick: ${tick}
     console.log(`
 🎯 V4 POOL MONITORING ACTIVE
 ========================
-Pool Manager: ${POOL_MANAGER}
+Pool Manager: ${DEPLOYMENTS_ADDRESS.POOL_MANAGER}
 Subscribers: ${subscribers.length}
 Trusted Traders: ${this.trustedTraderAddresses.size}
 ========================`);
